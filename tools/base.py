@@ -72,4 +72,23 @@ def build_default_registry() -> ToolRegistry:
     #
     # TODO[Day7] 再加入：
     # from .more_tools import web_fetch_tool, task_list_tool
+
+    # Code Planner Agent 工具集 (Day6+ v1)
+    # 注册 14 个代码分析 & git 操作工具
+    from .code_analysis import (
+        repo_structure_tool, mermaid_diagram_tool, static_scan_tool,
+        code_analyze_tool, generate_diff_tool, code_search_tool,
+        dep_graph_tool, test_runner_tool,
+    )
+    from .git_ops import (
+        git_clone_tool, git_bisect_start_tool, git_bisect_step_tool,
+        git_bisect_reset_tool, git_blame_tool, git_show_commit_tool,
+    )
+    for t in (repo_structure_tool, mermaid_diagram_tool, static_scan_tool,
+              code_analyze_tool, generate_diff_tool, code_search_tool,
+              dep_graph_tool, test_runner_tool,
+              git_clone_tool, git_bisect_start_tool, git_bisect_step_tool,
+              git_bisect_reset_tool, git_blame_tool, git_show_commit_tool):
+        reg.register(t)
+
     return reg

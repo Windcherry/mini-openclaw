@@ -6,6 +6,10 @@ pydantic>=2.0        # 工具 schema 校验
 markdownify>=0.13    # web_fetch: HTML -> markdown
 # ripgrep(rg) 请用系统包管理器安装：brew install ripgrep / apt install ripgrep（Day6 grep 工具）
 
+# --- Code Planner Agent 工具 (Day6+ v1) ---
+pylint>=3.0          # static_scan: 代码质量分析
+radon>=6.0           # static_scan: 圈复杂度 & 可维护性指数
+
 # --- Day8 MCP（可选，最小客户端可不依赖官方 SDK）---
 # mcp>=1.0           # 官方 SDK，做对照时再装
 
