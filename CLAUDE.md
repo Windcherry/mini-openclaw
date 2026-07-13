@@ -34,6 +34,8 @@ python -m security.redteam --backend deepseek --output security/report.md
 
 ```
                     ┌── Skills (catalog + on-demand body injection)
+                    ├── Memory (MEMORY.md + memory.json → system prompt)
+                    ├── Session (save/load/resume/export)
                     │
 User task → [agent/cli.py] → [agent/loop.py: AgentLoop] → [backend/client.py: DeepSeekBackend]
                  │                    ↑        │
@@ -52,15 +54,19 @@ User task → [agent/cli.py] → [agent/loop.py: AgentLoop] → [backend/client.
 ### Startup Pipeline (agent/cli.py)
 
 ```
-build_default_registry()     → 22 built-in tools
+build_default_registry()     → 23 built-in tools
     ↓
 load_skills() + match_skills → catalog in system prompt, matched body injected
+    ↓
+Memory recall (MEMORY.md + memory.json) → injected into system prompt
+    ↓
+Session check (list existing sessions, offer /resume)
     ↓
 MCPClient.start() + register_mcp_tools → mcp__echo merged into registry
     ↓
 DeepSeekBackend() (or FakeBackend fallback)
     ↓
-AgentLoop(backend, registry, system_prompt)
+AgentLoop(backend, registry, system_prompt) → interactive chat loop
 ```
 
 ### Internal Message Format
@@ -95,15 +101,15 @@ The loop in `agent/loop.py` assigns an `id` to each tool call from the model's r
 | `agent/context.py` | Token budget estimation (chars/4 + tool_call fields), `maybe_compact` (keep last K=4 rounds + summary), `truncate_observation` | **Complete** (Day7) |
 | `backend/client.py` | DeepSeek API client (OpenAI-compatible); sync `httpx.Client`, normalizes messages | **Complete** |
 | `backend/fake_backend.py` | Rule-based fake model: detects tool-result messages → final answer; else emits a dummy tool call if keywords match | **Complete** |
-| `backend/server.py` | Placeholder retained for optional middleware wrapping | Deprecated; use `client.py` directly |
-| `tools/base.py` | `Tool` dataclass + `ToolRegistry` + `build_default_registry()` | **Complete**; 22 tools registered |
+| `tools/base.py` | `Tool` dataclass + `ToolRegistry` + `build_default_registry()` | **Complete**; 23 tools registered |
 | `tools/fs.py` | `read` / `write` tools — read with line numbers + truncation + `<external>` boundary wrapping; write with auto-mkdir; path boundary enforced by `agent/permissions.py` | **Complete** (Day10) |
 | `tools/shell.py` | `bash` tool — bwrap sandbox (ro-bind root, writable cwd, unshare-net) with deny-list fallback; timeout + stdout/stderr/returncode | **Complete** (Day10) |
-| `tools/more_tools.py` | `edit` / `grep` / `glob` / `web_fetch` (domain allowlist + `<external>` wrapping) / `task_list` | **Complete** (Day10) |
+| `tools/more_tools.py` | `edit` / `grep` / `glob` / `web_fetch` (domain allowlist + `<external>` wrapping) / `task_list` / `remember` | **Complete** (Day10+) |
 | `tools/guard.py` | `wrap_external()` — external content boundary isolation; `check_host()` — outbound domain allowlist for web_fetch | **Complete** (Day10) |
 | `tools/code_analysis.py` | 8 code analysis tools: repo_structure, mermaid_diagram, static_scan, code_analyze, generate_diff, code_search, dep_graph, test_runner | **Complete** |
 | `tools/git_ops.py` | 6 git tools: clone, bisect (start/step/reset), blame, show_commit | **Complete** |
-| `prompt/render.py` | `render_prompt()` + `parse_tool_calls()` | Skeleton; TODO[Day3] |
+| `agent/memory.py` | `Memory` (text append + recall) + `KVMemory` (JSON KV, overwrite/delete) — persistent memory injected into system prompt | **Complete** (Day11+) |
+| `agent/session.py` | `save_session()` / `load_session()` / `list_sessions()` / `export_markdown()` — multi-session persistence with timestamped files | **Complete** (Day11+) |
 | `mcp/client.py` | MCP stdio+JSON-RPC client — `start()` handshake, `_rpc()`/`_notify()`, `list_tools()`/`call_tool()`, robustness for startup failure/empty readline/error field | **Complete** (Day8) |
 | `mcp/echo_server.py` | Minimal MCP echo server (stdio JSON-RPC loop, `echo` tool) | **Complete** |
 | `skills/loader.py` | `parse_skill_md()` (manual YAML frontmatter), `load_skills()`, `skills_catalog()`, `match_skills()` (3-strategy keyword recall with stop-words + bigram) | **Complete** (Day9) |
@@ -114,7 +120,6 @@ The loop in `agent/loop.py` assigns an `id` to each tool call from the model's r
 | `eval/tracer.py` | JSONL trajectory recorder (Tracer, replay, load_trajectory) | **Complete** (Day3) |
 | `eval/ablation.py` | Ablation study tooling + system-prompt ablation groups | **Complete** (Day3) |
 | `security/redteam.py` | Red team security testing: 4 attack surfaces × 6 test cases, dual-mode (model reasoning + tool-layer direct), auto-generated markdown report | **Complete** (Day10) |
-| `demo/inject.html` | Prompt injection test fixture — hidden malicious instructions in HTML comments + display:none paragraph | **Complete** (Day10) |
 
 ### Key Design Decisions
 
@@ -135,14 +140,15 @@ The loop in `agent/loop.py` assigns an `id` to each tool call from the model's r
 - **v2 (Day 7)**: ✅ web_fetch + task_list + error recovery (try/except in loop) + context compaction (maybe_compact with K=4 sliding window + backend-driven summarization)
 - **v3 (Day 9)**: ✅ MCP stdio client (handshake + tools/list + tools/call, robustness hardened) + Skills system (parse_skill_md + match_skills 3-strategy recall + repo-onboarding skill with scripts/references/assets)
 - **final (Day 10)**: ✅ Security layer — 3-tier permissions (read allow / write workdir-bound / exec confirm), shell sandbox (bwrap + deny-list), prompt injection guard (`<external>` boundary + outbound allowlist), destructive command detection, red team testing (6/6 intercepted), HTTP error recovery
+- **Day 11+**: ✅ Memory system (Memory + KVMemory + remember tool + system prompt injection), interactive multi-turn chat mode (`⏣` prompt, `/help` `/resume` `/compact` `/tokens` `/save` `/mem` `/model` commands), session persistence (timestamped multi-session save/load/export), surrogate character sanitization pipeline
 
-### Tool Inventory (22 tools, Day 10)
+### Tool Inventory (23 tools, Day 11+)
 
 | Category | Tools | Count |
 |----------|-------|-------|
 | Base (Day5) | read, write, bash | 3 |
 | Search/Edit (Day6) | edit, grep, glob | 3 |
-| Web/Tasks (Day7) | web_fetch, task_list | 2 |
+| Web/Tasks/Memory (Day7+) | web_fetch, task_list, remember | 3 |
 | Code Analysis | repo_structure, mermaid_diagram, static_scan, code_analyze, generate_diff, code_search, dep_graph, test_runner | 8 |
 | Git | git_clone, git_bisect_start, git_bisect_step, git_bisect_reset, git_blame, git_show_commit | 6 |
 | MCP (Day8) | mcp__echo (from echo_server.py) | 1+ |

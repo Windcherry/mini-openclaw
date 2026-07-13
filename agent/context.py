@@ -78,8 +78,19 @@ def maybe_compact(messages: list[dict[str, Any]], backend,
     return system + [summary_msg] + recent
 
 
+def _sanitize_surrogates(s: str) -> str:
+    """清理孤立 surrogate 字符（U+D800-U+DFFF），确保 UTF-8 可编码。
+
+    这些非法字符常来自 subprocess 捕获输出时的 surrogateescape 解码，
+    经过 json.dumps 或 httpx 序列化时会触发 'surrogates not allowed' 错误。
+    策略：surrogateescape 编码回字节 → replace 解码，将非法序列替换为 U+FFFD。
+    """
+    return s.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+
+
 def truncate_observation(text: str, max_chars: int = 4000) -> str:
-    """工具结果过长时截断并提示。"""
+    """工具结果过长时截断并提示（截断前先清理 surrogate 字符）。"""
+    text = _sanitize_surrogates(text)
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"\n...[已截断，共 {len(text)} 字符]"

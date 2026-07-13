@@ -5,3 +5,4 @@ out-*/
 *.bin
 *.gguf
 .DS_Store
+.mini-openclaw/

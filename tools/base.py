@@ -74,6 +74,10 @@ def build_default_registry() -> ToolRegistry:
     for t in (web_fetch_tool, task_list_tool):
         reg.register(t)
 
+    # Day11 记忆工具：
+    from .more_tools import remember_tool
+    reg.register(remember_tool)
+
     # Code Planner Agent 工具集 (Day6+ v1)
     # 注册 14 个代码分析 & git 操作工具
     from .code_analysis import (

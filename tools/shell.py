@@ -60,11 +60,14 @@ def _bash(command: str, timeout: int = 30) -> str:
         cmd = ["bash", "-c", command]
 
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           encoding="utf-8", errors="surrogateescape")
     except subprocess.TimeoutExpired:
         return f"[超时] 命令超过 {timeout}s 未结束：{command}"
 
+    # 清理 surrogate 字符（subprocess 在 text=True + surrogateescape 下可能产生）
     out = p.stdout or ""
+    out = out.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
     if p.stderr:
         out += f"\n[stderr]\n{p.stderr}"
     if p.returncode != 0:

@@ -221,7 +221,6 @@ class ToolCallCase:
 TOOLCALL_TESTSET: list[ToolCallCase] = [
     ToolCallCase("把 a.txt 的内容读出来", "read", {"path": "a.txt"}),
     ToolCallCase("在当前目录运行 ls", "bash", {"command": "ls"}),
-    # TODO[Day7] 按你组的领域补充更多用例
 ]
 
 
@@ -241,5 +240,4 @@ E2E_TASKS: list[E2ETask] = [
     E2ETask("hello", "创建 hello.py 并运行，输出当前时间", "存在 hello.py 且运行打印了时间"),
     E2ETask("todo-report", "扫描本项目所有 Python 文件里的 TODO 注释，生成 markdown 报告",
             "生成的报告列出了真实存在的 TODO"),
-    # TODO[Day10] 补充你领域的任务
 ]
