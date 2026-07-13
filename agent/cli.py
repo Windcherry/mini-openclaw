@@ -7,6 +7,7 @@
 from __future__ import annotations
 import argparse
 import sys
+from pathlib import Path
 
 from tools.base import build_default_registry
 from agent.prompts import SYSTEM_PROMPT
@@ -17,7 +18,7 @@ def selfcheck() -> int:
     ok = True
     try:
         reg = build_default_registry()
-        print(f"[ok] 工具注册表加载成功，当前内置工具数：{len(reg)}（Day5 起会变多）")
+        print(f"[ok] 工具注册表加载成功，当前内置工具数：{len(reg)}")
     except Exception as e:  # noqa
         print(f"[FAIL] 工具注册表：{e}"); ok = False
 
@@ -30,7 +31,7 @@ def selfcheck() -> int:
 
     try:
         from agent.loop import AgentLoop  # noqa
-        print("[ok] 主循环模块可导入（Day5 实现 run 逻辑）")
+        print("[ok] 主循环模块可导入")
     except Exception as e:  # noqa
         print(f"[FAIL] 主循环：{e}"); ok = False
 
@@ -43,6 +44,10 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="mini-openclaw")
     p.add_argument("task", nargs="?", help="要让 agent 完成的任务（自然语言）")
     p.add_argument("--selfcheck", action="store_true", help="只做骨架自检")
+    p.add_argument("--auto-approve", action="store_true",
+                   help="跳过权限确认，放行 confirm 级工具（写/bash/web_fetch）")
+    p.add_argument("--workdir", type=Path, default=Path.cwd(),
+                   help="工作目录边界（默认当前目录），写入操作不得越界")
     args = p.parse_args(argv)
 
     if args.selfcheck or not args.task:
@@ -78,8 +83,13 @@ def main(argv: list[str] | None = None) -> int:
         from backend.fake_backend import FakeBackend
         print(f"[提示] 未启用真后端（{e}），回退 FakeBackend。")
         backend = FakeBackend()
-    agent = AgentLoop(backend, reg, system)
-    print(agent.run(args.task))
+    agent = AgentLoop(backend, reg, system,
+                     workdir=args.workdir, auto_approve=args.auto_approve)
+    try:
+        result = agent.run(args.task)
+    except Exception as e:
+        result = f"[错误] Agent 运行异常：{e}"
+    print(result)
     return 0
 
 

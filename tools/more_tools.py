@@ -1,12 +1,12 @@
-"""完整工具集：edit / grep / glob（Day6，→ v1）+ web_fetch / task_list（Day7）。
+"""完整工具集：edit / grep / glob（Day6）+ web_fetch / task_list（Day7）。
 
-每个工具上午讲设计权衡，下午实现。这里只给签名与 TODO，便于你拆到独立文件。
-建议最终拆成 edit.py / search.py / web.py / todo.py，再在 base.build_default_registry 注册。
+web_fetch 叠加出站白名单 + <external> 边界（Day10 注入防护）。
 """
 from __future__ import annotations
 import subprocess
 from pathlib import Path
 from .base import Tool
+from .guard import wrap_external, check_host
 
 
 # --- edit：search-replace（最稳策略：old 必须唯一，否则提示模型调整）---
@@ -76,10 +76,19 @@ def _web_fetch(url: str, max_tokens: int = 2000) -> str:
 
     三步流水线：httpx 抓取 → markdownify 转换 → truncate 截断。
     截断是核心——否则一次抓取就能撑爆上下文窗口。
+
+    Day10 注入防护：
+      1. 出站白名单 —— 只放行 ALLOW_HOSTS 内的域名
+      2. 外部内容边界 —— 返回内容包 <external> 标签
     """
     import httpx
     from markdownify import markdownify as md
     from agent.context import truncate_observation
+
+    # 出站白名单检查
+    rejection = check_host(url)
+    if rejection:
+        return rejection
 
     try:
         resp = httpx.get(url, timeout=20, follow_redirects=True)
@@ -87,7 +96,9 @@ def _web_fetch(url: str, max_tokens: int = 2000) -> str:
     except httpx.HTTPError as e:
         return f"[抓取失败] {e}"
     text = md(resp.text)
-    return truncate_observation(text, max_chars=max_tokens * 4)
+    text = truncate_observation(text, max_chars=max_tokens * 4)
+    # 注入防护：外部内容包边界
+    return wrap_external(text, url)
 
 
 # --- task_list（TodoWrite）：自维护待办，提升长任务成功率 ---

@@ -1,16 +1,19 @@
-"""文件读写工具（Day5：read / write）。
+"""文件读写工具（Day5）。
 
-read 带行号输出，便于后续 edit 工具定位替换位置。
-write 覆盖写入，自动创建父目录。
-Day10 会在此层叠加工作目录边界检查。
+read 带行号输出，便于后续 edit 工具定位替换位置；输出包 <external> 边界（Day10 注入防护）。
+write 覆盖写入，自动创建父目录；越界写入由权限层（agent/permissions.py）拦截。
 """
 from __future__ import annotations
 import os
 from .base import Tool
+from .guard import wrap_external
 
 
 def _read(path: str, max_bytes: int = 100_000) -> str:
-    """读取文本文件，每行前加行号。超长时截断并提示。"""
+    """读取文本文件，每行前加行号。超长时截断并提示。
+
+    外部内容包 <external> 边界，告诉模型这是数据而非指令（Day10 注入防护）。
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read(max_bytes + 1)
@@ -26,7 +29,10 @@ def _read(path: str, max_bytes: int = 100_000) -> str:
     body = "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(lines, 1))
     if truncated:
         body += f"\n... [已截断，仅显示前 {max_bytes} 字节]"
-    return body or "[空文件]"
+    if not body:
+        body = "[空文件]"
+    # 注入防护：外部内容包边界
+    return wrap_external(body, path)
 
 
 def _write(path: str, content: str) -> str:
