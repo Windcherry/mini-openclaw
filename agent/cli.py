@@ -48,17 +48,37 @@ def main(argv: list[str] | None = None) -> int:
     if args.selfcheck or not args.task:
         return selfcheck()
 
-    # 真正跑任务：优先用 DeepSeek API；没配 key 时回退到 FakeBackend（离线打通管道）
     from agent.loop import AgentLoop
     reg = build_default_registry()
+
+    # Skills：catalog 始终可见，匹配的 body 按需注入
+    from skills.loader import load_skills, skills_catalog, match_skills
+    skills = load_skills()
+    system = SYSTEM_PROMPT + "\n\n# 可用 Skills（相关时按其流程执行）\n" + skills_catalog(skills)
+    matched = match_skills(args.task, skills)
+    if matched:
+        system += "\n\n# 已激活 Skill（任务命中，注入完整流程）\n"
+        for s in matched:
+            system += f"\n## {s.name}\n{s.body}\n"
+
+    # MCP：stdio 子进程接入外部工具，透明合并到 registry
+    from mcp.client import MCPClient, register_mcp_tools
+    try:
+        mcp = MCPClient(["python", "mcp/echo_server.py"])
+        mcp.start()
+        register_mcp_tools(reg, mcp)
+    except Exception as e:
+        print(f"[提示] MCP 未接入（{e}），仅用内置工具。")
+
+    # 后端：DeepSeek API 优先，未配 key 时回退 FakeBackend
     try:
         from backend.client import DeepSeekBackend
-        backend = DeepSeekBackend()                       # 需要 DEEPSEEK_API_KEY
-    except Exception as e:  # noqa
+        backend = DeepSeekBackend()
+    except Exception as e:
         from backend.fake_backend import FakeBackend
-        print(f"[提示] 未启用真后端（{e}），回退 FakeBackend。配置 DEEPSEEK_API_KEY 后即用真模型。")
+        print(f"[提示] 未启用真后端（{e}），回退 FakeBackend。")
         backend = FakeBackend()
-    agent = AgentLoop(backend, reg, SYSTEM_PROMPT)
+    agent = AgentLoop(backend, reg, system)
     print(agent.run(args.task))
     return 0
 

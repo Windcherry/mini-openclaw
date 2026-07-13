@@ -72,14 +72,63 @@ def _glob(pattern: str, max_items: int = 100) -> str:
 
 # --- web_fetch：URL -> markdown，控 token 预算 ---
 def _web_fetch(url: str, max_tokens: int = 2000) -> str:
-    # TODO[Day7] httpx 抓取 -> markdownify 转 markdown -> 截断到预算内
-    raise NotImplementedError("Day7：实现 web_fetch")
+    """抓取 URL → HTML 转 markdown → 按 token 预算截断。
+
+    三步流水线：httpx 抓取 → markdownify 转换 → truncate 截断。
+    截断是核心——否则一次抓取就能撑爆上下文窗口。
+    """
+    import httpx
+    from markdownify import markdownify as md
+    from agent.context import truncate_observation
+
+    try:
+        resp = httpx.get(url, timeout=20, follow_redirects=True)
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        return f"[抓取失败] {e}"
+    text = md(resp.text)
+    return truncate_observation(text, max_chars=max_tokens * 4)
 
 
 # --- task_list（TodoWrite）：自维护待办，提升长任务成功率 ---
+_tasks: list[dict] = []
+
+
 def _task_list(action: str, items: list | None = None) -> str:
-    # TODO[Day7] 维护一个结构化待办（add/update/complete），作为模型的 scratchpad
-    raise NotImplementedError("Day7：实现 task_list")
+    """维护结构化待办清单，作为模型的 scratchpad。
+
+    action: add | update | complete | list
+    items: add 时为任务描述字符串列表；update/complete 时为含 id 的对象列表。
+    """
+    global _tasks
+    items = items or []
+    if action == "add":
+        for item in items:
+            _tasks.append({"id": len(_tasks) + 1,
+                           "content": str(item), "status": "pending"})
+        return f"已添加 {len(items)} 个任务，当前共 {len(_tasks)} 项。"
+    elif action == "update":
+        for item in items:
+            for t in _tasks:
+                if t["id"] == item.get("id"):
+                    t["content"] = item.get("content", t["content"])
+        return f"已更新 {len(items)} 个任务。"
+    elif action == "complete":
+        for item in items:
+            tid = item.get("id") if isinstance(item, dict) else item
+            for t in _tasks:
+                if t["id"] == tid:
+                    t["status"] = "completed"
+        return f"已完成 {len(items)} 个任务。"
+    elif action == "list":
+        if not _tasks:
+            return "当前无待办任务。"
+        lines = []
+        for t in _tasks:
+            mark = "✅" if t["status"] == "completed" else "⏳"
+            lines.append(f"{mark} [{t['id']}] {t['content']}")
+        return "\n".join(lines)
+    return f"未知 action: {action}，支持 add/update/complete/list。"
 
 
 edit_tool = Tool(

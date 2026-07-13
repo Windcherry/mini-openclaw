@@ -25,20 +25,79 @@ class MCPClient:
         self._id = 0
 
     def start(self) -> None:
-        # TODO[Day8] 启动子进程，stdin/stdout 接管，做 initialize 握手
-        raise NotImplementedError("Day8：实现 stdio transport + initialize")
+        """启动子进程，接管 stdin/stdout/stderr，完成 initialize 握手。"""
+        try:
+            self.proc = subprocess.Popen(
+                self.command,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True, bufsize=1,          # 行缓冲，配合一行一条 JSON 消息
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"MCP server 启动失败：{' '.join(self.command)} —— {e}"
+            )
+        try:
+            self._rpc("initialize", {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "mini-openclaw", "version": "0.1"},
+            })
+        except Exception:
+            # 启动失败时尽量收集 stderr 诊断信息
+            stderr = ""
+            try:
+                self.proc.stderr.readline()
+                import select
+                while select.select([self.proc.stderr], [], [], 0.1)[0]:
+                    stderr += self.proc.stderr.readline()
+            except Exception:
+                pass
+            self.proc.kill()
+            self.proc.wait()
+            hint = f"\n[stderr] {stderr.strip()}" if stderr.strip() else ""
+            raise RuntimeError(
+                f"MCP server 启动失败：{' '.join(self.command)}{hint}"
+            )
+        self._notify("notifications/initialized")
 
     def _rpc(self, method: str, params: dict | None = None) -> Any:
-        # TODO[Day8] 发一条 JSON-RPC 请求（带自增 id），读回对应响应
-        raise NotImplementedError("Day8：实现 JSON-RPC 收发")
+        """发一条 JSON-RPC 请求（带自增 id），读回响应，返回 result。"""
+        if self.proc is None or self.proc.poll() is not None:
+            raise RuntimeError("MCP server 已退出，无法发送请求")
+        self._id += 1
+        req = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or {}}
+        self.proc.stdin.write(json.dumps(req) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            # server 已退出，收集 stderr 用于诊断
+            stderr = self.proc.stderr.read() if self.proc.stderr else ""
+            raise RuntimeError(
+                f"MCP server 意外退出（{' '.join(self.command)}）\n"
+                f"[stderr] {stderr.strip()}"
+            )
+        resp = json.loads(line)
+        if "error" in resp:
+            raise RuntimeError(resp["error"])
+        return resp.get("result")
+
+    def _notify(self, method: str, params: dict | None = None) -> None:
+        """发一条 JSON-RPC 通知（无 id），不等待响应。"""
+        req = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+        self.proc.stdin.write(json.dumps(req) + "\n")
+        self.proc.stdin.flush()
 
     def list_tools(self) -> list[dict]:
-        # TODO[Day8] 调 tools/list，返回工具描述列表
-        raise NotImplementedError("Day8：实现 tools/list")
+        """调用 tools/list，返回 server 暴露的工具描述列表。"""
+        return self._rpc("tools/list")["tools"]
 
     def call_tool(self, name: str, arguments: dict) -> str:
-        # TODO[Day8] 调 tools/call，返回结果文本
-        raise NotImplementedError("Day8：实现 tools/call")
+        """调用 tools/call，提取 result.content 中所有 text 片段并拼接。"""
+        result = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        parts = [c.get("text", "") for c in result.get("content", [])
+                 if c.get("type") == "text"]
+        return "\n".join(parts)
 
 
 def register_mcp_tools(registry: ToolRegistry, client: MCPClient) -> None:

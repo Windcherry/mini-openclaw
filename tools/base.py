@@ -69,8 +69,10 @@ def build_default_registry() -> ToolRegistry:
     for t in (edit_tool, grep_tool, glob_tool):
         reg.register(t)
     #
-    # TODO[Day7] 再加入：
-    # from .more_tools import web_fetch_tool, task_list_tool
+    # Day7 工具：
+    from .more_tools import web_fetch_tool, task_list_tool
+    for t in (web_fetch_tool, task_list_tool):
+        reg.register(t)
 
     # Code Planner Agent 工具集 (Day6+ v1)
     # 注册 14 个代码分析 & git 操作工具
