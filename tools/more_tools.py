@@ -4,26 +4,70 @@
 建议最终拆成 edit.py / search.py / web.py / todo.py，再在 base.build_default_registry 注册。
 """
 from __future__ import annotations
+import subprocess
+from pathlib import Path
 from .base import Tool
 
 
-# --- edit：三种策略权衡（整文件重写 / unified diff / search-replace）---
+# --- edit：search-replace（最稳策略：old 必须唯一，否则提示模型调整）---
 def _edit(path: str, old: str = "", new: str = "") -> str:
-    # TODO[Day6] 先实现最稳的 search-replace（old 在文件中唯一时替换为 new）
-    #            进阶：支持 unified diff / 整文件重写，比较失败率
-    raise NotImplementedError("Day6：实现 edit")
+    """精确字符串替换：old 在文件中恰好出现 1 次时才替换。
+
+    0 次 → 提示模型照抄原文（含缩进）；多次 → 提示扩展 old 使其唯一。
+    这是比 unified diff 更稳的策略——不依赖行号，模型只需要引用原文片段。
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    count = text.count(old)
+    if count == 0:
+        return f"[失败] 未找到待替换文本，请照抄文件原文（含缩进）。path={path}"
+    if count > 1:
+        return f"[失败] old 在文件中出现 {count} 次，不唯一；请扩大 old 片段使其唯一。"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text.replace(old, new, 1))
+    return f"已在 {path} 完成 1 处替换。"
 
 
-# --- grep：基于 ripgrep ---
-def _grep(pattern: str, path: str = ".") -> str:
-    # TODO[Day6] 调用系统 rg，返回匹配行（带文件名+行号）。与 glob 互补：grep 搜内容，glob 搜路径
-    raise NotImplementedError("Day6：实现 grep")
+# --- grep：基于 ripgrep，搜内容（与 glob 互补：grep 搜内容，glob 搜路径）---
+def _grep(pattern: str, path: str = ".", max_lines: int = 100) -> str:
+    """在文件中搜索匹配 pattern 的行，返回 文件:行号:内容 格式。
+
+    Args:
+        pattern: ripgrep 搜索模式（正则）
+        path: 搜索路径（文件或目录）
+        max_lines: 最大返回行数，超出则截断并提示
+    """
+    try:
+        p = subprocess.run(
+            ["rg", "--line-number", "--no-heading", pattern, path],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        return "[失败] 未找到 rg，请先安装 ripgrep。"
+    if p.returncode not in (0, 1):  # 1 = 无匹配，属正常
+        return f"[grep 出错] {p.stderr.strip()}"
+    lines = p.stdout.splitlines()
+    if not lines:
+        return f"[无匹配] pattern={pattern}"
+    if len(lines) > max_lines:
+        return "\n".join(lines[:max_lines]) + f"\n... [共 {len(lines)} 行，已截断前 {max_lines} 行]"
+    return "\n".join(lines)
 
 
-# --- glob：按文件名模式找文件 ---
-def _glob(pattern: str) -> str:
-    # TODO[Day6] 用 pathlib.Path().glob / rglob 找路径
-    raise NotImplementedError("Day6：实现 glob")
+# --- glob：按文件名模式找文件（与 grep 互补：grep 搜内容，glob 搜路径）---
+def _glob(pattern: str, max_items: int = 100) -> str:
+    """递归匹配文件名，返回相对路径列表。
+
+    Args:
+        pattern: 通配模式（如 *.py、**/*.md），支持 pathlib rglob 语法
+        max_items: 最大返回数，超出则截断并提示
+    """
+    paths = [str(p) for p in Path(".").rglob(pattern) if p.is_file()]
+    if not paths:
+        return f"[无匹配] pattern={pattern}"
+    if len(paths) > max_items:
+        return "\n".join(paths[:max_items]) + f"\n... [共 {len(paths)} 个，已截断前 {max_items} 个]"
+    return "\n".join(paths)
 
 
 # --- web_fetch：URL -> markdown，控 token 预算 ---
@@ -38,16 +82,44 @@ def _task_list(action: str, items: list | None = None) -> str:
     raise NotImplementedError("Day7：实现 task_list")
 
 
-edit_tool = Tool("edit", "编辑文件：把 old 文本替换为 new。",
-                 {"type": "object", "properties": {"path": {"type": "string"},
-                  "old": {"type": "string"}, "new": {"type": "string"}},
-                  "required": ["path", "old", "new"]}, _edit)
-grep_tool = Tool("grep", "在文件中搜索匹配 pattern 的行（基于 ripgrep）。",
-                 {"type": "object", "properties": {"pattern": {"type": "string"},
-                  "path": {"type": "string"}}, "required": ["pattern"]}, _grep)
-glob_tool = Tool("glob", "按通配模式查找文件路径。",
-                 {"type": "object", "properties": {"pattern": {"type": "string"}},
-                  "required": ["pattern"]}, _glob)
+edit_tool = Tool(
+    name="edit",
+    description=(
+        "精确替换文件中的文本（search-replace）。"
+        "old 必须是文件中恰好出现 1 次的原文片段（含缩进），否则替换会失败。"
+        "如果 old 出现 0 次或多次，请照抄原文扩大 old 范围使其唯一。"
+    ),
+    parameters={"type": "object",
+                "properties": {"path": {"type": "string", "description": "要编辑的文件路径"},
+                               "old": {"type": "string", "description": "要替换的原文本（必须照抄原文，含缩进，且在文件中唯一）"},
+                               "new": {"type": "string", "description": "替换后的新文本"}},
+                "required": ["path", "old", "new"]},
+    run=_edit,
+)
+grep_tool = Tool(
+    name="grep",
+    description=(
+        "在文件中搜索匹配 pattern 的行，返回 文件:行号:内容 格式。"
+        "基于 ripgrep，支持正则表达式。用于搜代码内容（与 glob 互补：grep 搜内容，glob 搜文件名）。"
+    ),
+    parameters={"type": "object",
+                "properties": {"pattern": {"type": "string", "description": "搜索模式（正则表达式，如 def main、TODO、import os）"},
+                               "path": {"type": "string", "description": "搜索路径，可以是文件或目录，默认当前目录"}},
+                "required": ["pattern"]},
+    run=_grep,
+)
+glob_tool = Tool(
+    name="glob",
+    description=(
+        "按文件名通配模式递归查找文件，返回相对路径列表。"
+        "用于搜文件路径（与 grep 互补：grep 搜内容，glob 搜文件名）。"
+        "模式示例：*.py（所有 Python 文件）、**/*.md（所有 Markdown 文件）、**/test_*.py（所有测试文件）。"
+    ),
+    parameters={"type": "object",
+                "properties": {"pattern": {"type": "string", "description": "文件名通配模式（如 *.py、**/*.md、**/test_*.py）"}},
+                "required": ["pattern"]},
+    run=_glob,
+)
 web_fetch_tool = Tool("web_fetch", "抓取 URL 并转为 markdown（受 token 预算限制）。",
                       {"type": "object", "properties": {"url": {"type": "string"}},
                        "required": ["url"]}, _web_fetch)

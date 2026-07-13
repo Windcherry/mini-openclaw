@@ -1,16 +1,40 @@
-"""文件读写工具（Day5：read / write）。"""
+"""文件读写工具（Day5：read / write）。
+
+read 带行号输出，便于后续 edit 工具定位替换位置。
+write 覆盖写入，自动创建父目录。
+Day10 会在此层叠加工作目录边界检查。
+"""
 from __future__ import annotations
+import os
 from .base import Tool
 
 
 def _read(path: str, max_bytes: int = 100_000) -> str:
-    # TODO[Day5] 读取文件，超长截断并提示；带行号更利于后续 edit 定位
-    raise NotImplementedError("Day5：实现 read")
+    """读取文本文件，每行前加行号。超长时截断并提示。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read(max_bytes + 1)
+    except FileNotFoundError:
+        return f"错误：文件不存在 —— {path}"
+    except (PermissionError, OSError) as e:
+        return f"错误：无法读取 {path} —— {e}"
+
+    truncated = len(text) > max_bytes
+    if truncated:
+        text = text[:max_bytes]
+    lines = text.splitlines()
+    body = "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(lines, 1))
+    if truncated:
+        body += f"\n... [已截断，仅显示前 {max_bytes} 字节]"
+    return body or "[空文件]"
 
 
 def _write(path: str, content: str) -> str:
-    # TODO[Day5] 写文件；注意权限层（Day10）后续会拦截工作目录外的写入
-    raise NotImplementedError("Day5：实现 write")
+    """覆盖写入文件，自动创建父目录。返回含字节数与路径的成功提示。"""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        n = f.write(content)
+    return f"已写入 {n} 字节到 {path}"
 
 
 read_tool = Tool(

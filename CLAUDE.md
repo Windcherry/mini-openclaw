@@ -66,22 +66,27 @@ The loop in `agent/loop.py` assigns an `id` to each tool call from the model's r
 | Module | Purpose | Status |
 |--------|---------|--------|
 | `agent/cli.py` | CLI entry point; parses args, wires backend + registry + loop | Skeleton done; auto-falls back to FakeBackend |
-| `agent/loop.py` | ReAct loop: calls backend, executes tool_calls, injects observations, max_turns=20 guard | Loop skeleton complete; tool dispatch works but tools are `NotImplementedError` |
-| `agent/prompts.py` | `SYSTEM_PROMPT` — the system message that defines agent behavior | Draft exists; TODO[Day5][Day7] to refine |
+| `agent/loop.py` | ReAct loop: calls backend, executes tool_calls, injects observations, max_turns=20 guard | Loop skeleton complete; TODO[Day7] error recovery + context compaction |
+| `agent/prompts.py` | `SYSTEM_PROMPT` — the system message that defines agent behavior | **Complete** (Day5); TODO[Day7] add edit/grep/glob workflows |
 | `agent/context.py` | Token budget estimation, sliding-window compaction, observation truncation | Skeleton only; TODO[Day7] |
 | `backend/client.py` | DeepSeek API client (OpenAI-compatible); sync `httpx.Client`, normalizes messages | **Complete** |
 | `backend/fake_backend.py` | Rule-based fake model: detects tool-result messages → final answer; else emits a dummy tool call if keywords match | **Complete** |
 | `backend/server.py` | Placeholder retained for optional middleware wrapping (retry/logging/rate-limiting proxy) | Deprecated; use `client.py` directly |
-| `tools/base.py` | `Tool` dataclass + `ToolRegistry` + `build_default_registry()` | Registry done; tool registration commented out (TODO[Day5–7]) |
-| `tools/fs.py` | `read` / `write` tools | Signatures defined; TODO[Day5] |
-| `tools/shell.py` | `bash` tool (timeout default 30s) | Signature defined; TODO[Day5]; TODO[Day10] sandbox |
-| `tools/more_tools.py` | `edit` / `grep` / `glob` (Day6) + `web_fetch` / `task_list` (Day7) | Signatures defined; all TODO |
+| `tools/base.py` | `Tool` dataclass + `ToolRegistry` + `build_default_registry()` | **Complete**; 20 tools registered (3 base + 3 Day6 + 14 domain) |
+| `tools/fs.py` | `read` / `write` tools — read with line numbers + truncation, write with auto-mkdir | **Complete** (Day5); TODO[Day10] path boundary check |
+| `tools/shell.py` | `bash` tool — subprocess with timeout, captures stdout/stderr/returncode | **Complete** (Day5); TODO[Day10] sandbox + permission |
+| `tools/more_tools.py` | `edit` (search-replace, old must be unique) / `grep` (ripgrep) / `glob` (pathlib rglob) | **Complete** (Day6); `web_fetch` / `task_list` TODO[Day7] |
+| `tools/code_analysis.py` | 8 code analysis tools: repo_structure, mermaid_diagram, static_scan, code_analyze, generate_diff, code_search, dep_graph, test_runner | **Complete** |
+| `tools/git_ops.py` | 6 git tools: clone, bisect (start/step/reset), blame, show_commit | **Complete** |
 | `prompt/render.py` | `render_prompt()`: messages + tools → single text string; `parse_tool_calls()`: extract tool calls from model output | Skeleton; TODO[Day3] |
 | `mcp/client.py` | MCP stdio+JSON-RPC client; `register_mcp_tools()` merges MCP tools into built-in registry with `mcp__` prefix | Skeleton; TODO[Day8] |
 | `mcp/echo_server.py` | Minimal MCP echo server (stdio JSON-RPC loop, `echo` tool) | **Complete** |
 | `skills/loader.py` | Scans `skills/*/SKILL.md`, parses YAML frontmatter, generates catalog for system prompt | Skeleton; TODO[Day9] |
-| `eval/tasks.py` | Tool-call test cases + end-to-end task definitions | Format examples; TODO to populate |
-| `eval/metrics.py` | Tool-call quality metrics: JSON validity, tool choice accuracy, arg accuracy | Skeleton; TODO[Day7] |
+| `eval/tasks.py` | 13 trajectory-based Task definitions with programmatic check functions, covering 5 project goals | **Complete** (Day3) |
+| `eval/metrics.py` | 4 metrics (success_rate, step_count, token_count, json_valid_rate) + 15 SAMPLE_RECORDS | **Complete** (Day3) |
+| `eval/judge.py` | LLM-as-judge with 6 domain-specific rubrics (RUBRIC_BASIC/SCAN/DEPS/LOCATE/REFACTOR/REPORT) | **Complete** (Day3) |
+| `eval/tracer.py` | JSONL trajectory recorder (Tracer, replay, load_trajectory) | **Complete** (Day3) |
+| `eval/ablation.py` | Ablation study tooling (summarize, ablation_report) + system-prompt ablation groups | **Complete** (Day3) |
 
 ### Key Design Decisions
 
@@ -94,9 +99,20 @@ The loop in `agent/loop.py` assigns an `id` to each tool call from the model's r
 
 ### Milestones
 
-- **v1 (Day 6)**: End-to-end usable — agent can complete "create hello.py and run it"
+- **v1 (Day 6)**: ✅ 6 core tools done (read/write/bash/edit/grep/glob) — 20 tools total. Agent can complete "create hello.py and run it" end-to-end.
+- **v2 (Day 7)**: web_fetch + task_list + error recovery + context compaction
 - **v3 (Day 9)**: MCP + Skills integration
 - **final (Day 10)**: Security layer (sandbox, permissions), Demo Day
+
+### Tool Inventory (20 tools, Day 6)
+
+| Category | Tools | Count |
+|----------|-------|-------|
+| Base (Day5) | read, write, bash | 3 |
+| Search/Edit (Day6) | edit, grep, glob | 3 |
+| Code Analysis | repo_structure, mermaid_diagram, static_scan, code_analyze, generate_diff, code_search, dep_graph, test_runner | 8 |
+| Git | git_clone, git_bisect_start, git_bisect_step, git_bisect_reset, git_blame, git_show_commit | 6 |
+| Pending (Day7) | web_fetch, task_list | 2 |
 
 ### Environment Variables
 
