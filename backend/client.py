@@ -36,9 +36,10 @@ class DeepSeekBackend:
     def chat(self, messages: list[dict[str, Any]], tools: list[dict] | None = None,
              temperature: float = 0.0) -> dict[str, Any]:
         """一次（非流式）对话补全，返回归一化的 assistant 消息。"""
+        openai_msgs = self._to_openai_messages(messages)
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": self._to_openai_messages(messages),
+            "messages": openai_msgs,
             "temperature": temperature,
         }
         if tools:

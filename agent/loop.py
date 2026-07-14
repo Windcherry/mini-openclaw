@@ -88,7 +88,7 @@ def _run_tool_safely(tool: Any, tool_args: dict, max_retries: int = 3) -> str:
 
 class AgentLoop:
     def __init__(self, backend: Any, registry: ToolRegistry, system_prompt: str,
-                 max_turns: int = 40, workdir: Path = WORKDIR,
+                 max_turns: int = 100, workdir: Path = WORKDIR,
                  auto_approve: bool = False):
         self.backend = backend
         self.registry = registry
@@ -108,7 +108,9 @@ class AgentLoop:
         turn_messages = list(messages)
 
         # ── Todo 注入：每轮把当前任务清单拼进上下文（防漂移，讲义 §8.3）──
-        # 先清除上一轮的旧注入，再追加最新状态，避免累积重复
+        # 先清除上一轮的旧注入，再插入到 system prompt 之后，避免累积重复。
+        # 插入位置为 1（紧跟主 system prompt），而非 append 到末尾 ——
+        # 因为末尾的 system 消息可能导致部分 API（如 DeepSeek）返回 400。
         _TODO_MARKER = "# 当前任务清单"
         turn_messages = [m for m in turn_messages
                          if not (m.get("role") == "system" and m.get("content", "").startswith(_TODO_MARKER))]
@@ -116,7 +118,7 @@ class AgentLoop:
             from tools.more_tools import TODO
             todo_snapshot = ""
             if TODO.items:
-                turn_messages.append({
+                turn_messages.insert(1, {
                     "role": "system",
                     "content": f"{_TODO_MARKER}（推进它，别跑偏）\n{TODO.render()}",
                 })
@@ -134,7 +136,7 @@ class AgentLoop:
             if stall_warn:
                 warnings.append(f"⚠️ {stall_warn}")
             warnings.append("请停止当前策略，重新规划下一步。")
-            turn_messages.append({
+            turn_messages.insert(1, {
                 "role": "system",
                 "content": "\n".join(warnings),
             })
@@ -143,6 +145,13 @@ class AgentLoop:
             assistant = self.backend.chat(turn_messages, tools=self.registry.schemas())
         except httpx.HTTPStatusError as e:
             code = e.response.status_code
+            # 尝试提取 API 返回的详细错误信息
+            detail = ""
+            try:
+                body = e.response.json()
+                detail = body.get("error", {}).get("message", "")
+            except Exception:
+                pass
             if code == 401:
                 return turn_messages, "[错误] API Key 无效（401）。请检查 DEEPSEEK_API_KEY 环境变量是否正确、是否过期。"
             elif code == 429:
@@ -150,7 +159,10 @@ class AgentLoop:
             elif 500 <= code < 600:
                 return turn_messages, f"[错误] API 服务端异常（{code}）。请稍后重试或检查 DeepSeek 服务状态。"
             else:
-                return turn_messages, f"[错误] API 请求失败（{code}）：{e}"
+                msg = f"[错误] API 请求失败（{code}）"
+                if detail:
+                    msg += f"：{detail}"
+                return turn_messages, msg
         except httpx.TimeoutException:
             return turn_messages, "[错误] API 请求超时。请检查网络连接或稍后重试。"
         except httpx.ConnectError as e:
