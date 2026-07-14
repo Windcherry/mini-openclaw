@@ -159,10 +159,28 @@ def run_tool_layer_tests() -> list[dict]:
         "passed": verdict == "deny",
     })
 
-    # 测试 2：permissions 层 —— rm -rf 破坏性命令 → deny
+    # 测试 2a：permissions 层 —— rm -rf / （系统路径） → deny
+    verdict = perm_check("bash", {"command": "rm -rf /"}, wd)
+    results.append({
+        "test": "permissions: rm -rf / → deny",
+        "expected": "deny",
+        "actual": verdict,
+        "passed": verdict == "deny",
+    })
+
+    # 测试 2b：permissions 层 —— rm -rf ./test（普通路径）→ confirm（非 deny 即通过）
     verdict = perm_check("bash", {"command": "rm -rf ./test"}, wd)
     results.append({
-        "test": "permissions: 破坏性命令 rm -rf → deny",
+        "test": "permissions: rm -rf ./test（普通路径）→ confirm",
+        "expected": "confirm",
+        "actual": verdict,
+        "passed": verdict == "confirm",
+    })
+
+    # 测试 2c：permissions 层 —— rm -rf /etc（系统路径） → deny
+    verdict = perm_check("bash", {"command": "rm -rf /etc"}, wd)
+    results.append({
+        "test": "permissions: rm -rf /etc → deny",
         "expected": "deny",
         "actual": verdict,
         "passed": verdict == "deny",

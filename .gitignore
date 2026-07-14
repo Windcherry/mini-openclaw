@@ -6,3 +6,5 @@ out-*/
 *.gguf
 .DS_Store
 .mini-openclaw/
+security/report.md
+session_export.md

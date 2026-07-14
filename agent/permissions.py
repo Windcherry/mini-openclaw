@@ -14,12 +14,32 @@ EXEC     = {"bash", "web_fetch"}
 
 # bash 安全命令（纯只读，不写文件不执行代码）→ 自动放行
 SAFE_BASH = {
-    "ls", "cat", "echo", "pwd", "whoami", "date", "head", "tail",
-    "wc", "which", "env", "printenv", "uname", "hostname", "id",
+    # 文件列表与信息
+    "ls", "tree", "dir", "stat", "file", "readlink", "realpath",
+    "basename", "dirname",
+    # 文本输出
+    "cat", "echo", "head", "tail", "nl", "od", "strings",
+    # 文本搜索
+    "find", "locate", "grep", "rg",
+    # 文本处理（只读，无 -i 等原地修改标志）
+    "sort", "uniq", "cut", "tr", "fmt", "wc",
+    # 比较
+    "diff", "cmp", "comm", "sdiff",
+    # 校验
+    "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
+    # 系统信息
+    "pwd", "whoami", "date", "which", "type", "command",
+    "env", "printenv", "uname", "hostname", "id",
     "df", "du", "free", "uptime", "ps", "pgrep",
+    "dmesg", "lsblk", "lscpu", "lsusb", "lspci",
+    # 帮助
+    "man", "info", "apropos", "whatis",
 }
 # 含这些运算符的命令即使以安全命令开头也需确认
 RISKY_OPERATORS = (">", ">>", "|", ";", "&&", "||", "`", "$(")
+
+# find 虽然是只读工具，但 -delete / -exec / -ok 可以执行破坏操作
+RISKY_FIND_FLAGS = ("-delete", "-exec", "-execdir", "-ok", "-okdir")
 
 # 破坏性命令模式 —— 即使 --auto-approve 也必须拒绝
 # 仅限于不可逆的系统级破坏操作：fork 炸弹、格式化、裸磁盘写入
@@ -90,6 +110,9 @@ def check(tool_name: str, args: dict, workdir: Path) -> str:
             # 3c. 安全纯读命令（ls/cat/echo/…）：自动放行
             if (first_word in SAFE_BASH
                     and not any(op in command for op in RISKY_OPERATORS)):
+                # find 额外检查：含 -delete / -exec 等破坏性 flag 则降级为 confirm
+                if first_word == "find" and any(f in command for f in RISKY_FIND_FLAGS):
+                    return "confirm"
                 return "allow"
         return "confirm"
 

@@ -54,11 +54,13 @@ User task → [agent/cli.py] → [agent/loop.py: AgentLoop] → [backend/client.
 ### Startup Pipeline (agent/cli.py)
 
 ```
-build_default_registry()     → 23 built-in tools
+build_default_registry()     → 24 built-in tools
     ↓
 load_skills() + match_skills → catalog in system prompt, matched body injected
     ↓
 Memory recall (MEMORY.md + memory.json) → injected into system prompt
+    ↓
+readline setup (history file ~/.mini-openclaw_history, ANSI prompt wrapping)
     ↓
 Session check (list existing sessions, offer /resume)
     ↓
@@ -94,22 +96,24 @@ The loop in `agent/loop.py` assigns an `id` to each tool call from the model's r
 
 | Module | Purpose | Status |
 |--------|---------|--------|
-| `agent/cli.py` | CLI entry point; wires backend + registry + MCP + Skills + loop | **Complete** |
-| `agent/loop.py` | ReAct loop: calls backend, permissions check before tool execution, error recovery, context compaction, max_turns=40 guard | **Complete** (Day10) |
-| `agent/permissions.py` | `check()` — 3-tier permission model (READONLY allow / WRITE workdir-bound confirm/deny / EXEC confirm) + destructive command patterns | **Complete** (Day10) |
+| `agent/cli.py` | CLI entry point; wires backend + registry + MCP + Skills + loop; readline history + ANSI-prompt wrapping for cursor movement | **Complete** |
+| `agent/loop.py` | ReAct loop: calls backend, permissions check before tool execution, `_run_tool_safely` with transient/permanent error classification + retry, context compaction, loop/stall detection, max_turns=40 guard, N-key task cancel | **Complete** (Day11+) |
+| `agent/permissions.py` | `check()` — 3-tier permission model (READONLY allow / WRITE workdir-bound confirm/deny / EXEC confirm) + `SAFE_BASH` auto-allow + `DESTRUCTIVE` (fork bomb/mkfs/dd) hard-deny + `DESTRUCTIVE_TARGETS` (system paths for rm/chmod/chown) hard-deny | **Complete** (Day11+) |
 | `agent/prompts.py` | `SYSTEM_PROMPT` — the system message that defines agent behavior | **Complete** (Day5) |
-| `agent/context.py` | Token budget estimation (chars/4 + tool_call fields), `maybe_compact` (keep last K=4 rounds + summary), `truncate_observation` | **Complete** (Day7) |
+| `agent/context.py` | Token budget estimation (chars/4 + tool_call fields), `maybe_compact` (keep last K=4 rounds + summary), `truncate_observation`, `_sanitize_surrogates` (U+D800-U+DFFF → U+FFFD) | **Complete** (Day11+) |
 | `backend/client.py` | DeepSeek API client (OpenAI-compatible); sync `httpx.Client`, normalizes messages | **Complete** |
 | `backend/fake_backend.py` | Rule-based fake model: detects tool-result messages → final answer; else emits a dummy tool call if keywords match | **Complete** |
-| `tools/base.py` | `Tool` dataclass + `ToolRegistry` + `build_default_registry()` | **Complete**; 23 tools registered |
+| `tools/base.py` | `Tool` dataclass + `ToolRegistry` + `build_default_registry()` | **Complete**; 24 tools registered |
 | `tools/fs.py` | `read` / `write` tools — read with line numbers + truncation + `<external>` boundary wrapping; write with auto-mkdir; path boundary enforced by `agent/permissions.py` | **Complete** (Day10) |
 | `tools/shell.py` | `bash` tool — bwrap sandbox (ro-bind root, writable cwd, unshare-net) with deny-list fallback; timeout + stdout/stderr/returncode | **Complete** (Day10) |
-| `tools/more_tools.py` | `edit` / `grep` / `glob` / `web_fetch` (domain allowlist + `<external>` wrapping) / `task_list` / `remember` | **Complete** (Day10+) |
+| `tools/more_tools.py` | `edit` / `grep` / `glob` / `web_fetch` (domain allowlist + `<external>` wrapping) / `todo_write` / `update_todo` / `remember` | **Complete** (Day11+) |
 | `tools/guard.py` | `wrap_external()` — external content boundary isolation; `check_host()` — outbound domain allowlist for web_fetch | **Complete** (Day10) |
 | `tools/code_analysis.py` | 8 code analysis tools: repo_structure, mermaid_diagram, static_scan, code_analyze, generate_diff, code_search, dep_graph, test_runner | **Complete** |
 | `tools/git_ops.py` | 6 git tools: clone, bisect (start/step/reset), blame, show_commit | **Complete** |
+| `agent/planning.py` | `TodoList` state machine (pending→in_progress→completed/blocked) + `LoopDetector` (repetition + stall detection) + `TransientError`/`PermanentError`/`with_retry` | **Complete** (Day11+) |
 | `agent/memory.py` | `Memory` (text append + recall) + `KVMemory` (JSON KV, overwrite/delete) — persistent memory injected into system prompt | **Complete** (Day11+) |
 | `agent/session.py` | `save_session()` / `load_session()` / `list_sessions()` / `export_markdown()` — multi-session persistence with timestamped files | **Complete** (Day11+) |
+| `prompt/render.py` | `render_prompt()` messages→ChatML text, `parse_tool_calls()` text→structured calls with JSON repair, `render_tools_block()` OpenAI schema→readable text | **Complete** (Day11+) |
 | `mcp/client.py` | MCP stdio+JSON-RPC client — `start()` handshake, `_rpc()`/`_notify()`, `list_tools()`/`call_tool()`, robustness for startup failure/empty readline/error field | **Complete** (Day8) |
 | `mcp/echo_server.py` | Minimal MCP echo server (stdio JSON-RPC loop, `echo` tool) | **Complete** |
 | `skills/loader.py` | `parse_skill_md()` (manual YAML frontmatter), `load_skills()`, `skills_catalog()`, `match_skills()` (3-strategy keyword recall with stop-words + bigram) | **Complete** (Day9) |
@@ -131,24 +135,25 @@ The loop in `agent/loop.py` assigns an `id` to each tool call from the model's r
 - **Skills vs Tools**: A Tool is a single function call. A Skill is a `SKILL.md` file (YAML frontmatter + Markdown body) with optional `scripts/`, `references/`, and `assets/`. Skills are loaded on-demand via keyword matching against the task description.
 - **MCP transparency**: MCP tools are registered into the same `ToolRegistry` as built-in tools. `AgentLoop` treats them identically — the model doesn't distinguish between built-in and MCP tools.
 - **Progressive disclosure**: Skills use 3-level loading — metadata (always in context, ~100 words), body (injected when task matches keywords, <5k words), bundled resources (loaded on demand by Claude).
-- **Permission model**: 3-tier `check()` inserted between tool call parsing and execution. `deny` is absolute (even `--auto-approve` cannot override). Destructive bash commands (`rm -rf`, `mkfs`, etc.) are hard-denied.
+- **Permission model**: 3-tier `check()` inserted between tool call parsing and execution. `deny` is absolute (even `--auto-approve` cannot override). Only system-level destructive operations (fork bomb, mkfs, dd, device writes, rm/chmod targeting system paths like `/`, `/etc`, `~`) are hard-denied; ordinary `rm -rf ./folder` inside workdir goes to `confirm`. `SAFE_BASH` read-only commands (ls, cat, pwd, etc.) are auto-allowed.
 - **Defense-in-depth**: 5-layer security — model alignment → injection guard → permissions → destructive detection → sandbox. No single bypass compromises all layers.
+- **Granular bash permissions**: Safe read-only commands (ls/cat/echo/pwd/…) auto-allowed; commands with risky operators (pipe, redirect, `;`, `$()`) confirmed; rm/chmod/chown confirmed unless targeting system paths; fork bomb/mkfs/dd/raw device writes hard-denied.
 
 ### Milestones
 
 - **v1 (Day 6)**: ✅ 6 core tools (read/write/bash/edit/grep/glob) + 14 domain tools = 20 tools. Agent completes "create hello.py and run it" end-to-end.
-- **v2 (Day 7)**: ✅ web_fetch + task_list + error recovery (try/except in loop) + context compaction (maybe_compact with K=4 sliding window + backend-driven summarization)
+- **v2 (Day 7)**: ✅ web_fetch + todo_write/update_todo + error recovery (try/except in loop) + context compaction (maybe_compact with K=4 sliding window + backend-driven summarization)
 - **v3 (Day 9)**: ✅ MCP stdio client (handshake + tools/list + tools/call, robustness hardened) + Skills system (parse_skill_md + match_skills 3-strategy recall + repo-onboarding skill with scripts/references/assets)
 - **final (Day 10)**: ✅ Security layer — 3-tier permissions (read allow / write workdir-bound / exec confirm), shell sandbox (bwrap + deny-list), prompt injection guard (`<external>` boundary + outbound allowlist), destructive command detection, red team testing (6/6 intercepted), HTTP error recovery
-- **Day 11+**: ✅ Memory system (Memory + KVMemory + remember tool + system prompt injection), interactive multi-turn chat mode (`⏣` prompt, `/help` `/resume` `/compact` `/tokens` `/save` `/mem` `/model` commands), session persistence (timestamped multi-session save/load/export), surrogate character sanitization pipeline
+- **Day 11+**: ✅ Memory system (Memory + KVMemory + remember tool + system prompt injection), interactive multi-turn chat mode (`⏣` prompt, `/help` `/resume` `/compact` `/tokens` `/save` `/mem` `/model` commands, readline cursor movement + history), session persistence (timestamped multi-session save/load/export), surrogate character sanitization pipeline, TodoList state machine + todo_write/update_todo tools + todo injection per turn, error classification (TransientError retry + PermanentError re-plan), LoopDetector (repetition + stall detection), granular bash permissions (SAFE_BASH auto-allow + DESTRUCTIVE_TARGETS for rm/chmod/chown)
 
-### Tool Inventory (23 tools, Day 11+)
+### Tool Inventory (24 tools, Day 11+)
 
 | Category | Tools | Count |
 |----------|-------|-------|
 | Base (Day5) | read, write, bash | 3 |
 | Search/Edit (Day6) | edit, grep, glob | 3 |
-| Web/Tasks/Memory (Day7+) | web_fetch, task_list, remember | 3 |
+| Web/Tasks/Memory (Day7+) | web_fetch, todo_write, update_todo, remember | 4 |
 | Code Analysis | repo_structure, mermaid_diagram, static_scan, code_analyze, generate_diff, code_search, dep_graph, test_runner | 8 |
 | Git | git_clone, git_bisect_start, git_bisect_step, git_bisect_reset, git_blame, git_show_commit | 6 |
 | MCP (Day8) | mcp__echo (from echo_server.py) | 1+ |
@@ -170,9 +175,9 @@ Skill loading flow:
 - **Compaction**: `maybe_compact(messages, backend, budget=6000)` — when tokens exceed budget, keep system[0] + last K=4 assistant rounds, summarize middle history via backend into a system备忘
 - **Truncation**: `truncate_observation(text, max_chars=4000)` — tool results truncated with `...[已截断，共 N 字符]` marker
 
-### Error Recovery (Day 7)
+### Error Recovery (Day 11+)
 
-Tool execution in `agent/loop.py` is wrapped in try/except — exceptions are caught and converted to observation text fed back to the model for self-correction. Unknown tools produce `"错误：未知工具 {name}"`.
+Tool execution in `agent/loop.py` is wrapped in `_run_tool_safely()` with automatic retry + exponential backoff. `_classify_error()` distinguishes transient errors (network/timeout/rate-limit → retry up to 3 times) from permanent errors (file not found/syntax/permission → immediate re-plan). Retry exhaustion produces a `[重试耗尽]` marker guiding the model to block the subtask. Unknown tools produce `"错误：未知工具 {name}"`.
 
 ### Security (Day 10)
 
@@ -183,14 +188,18 @@ Tool execution in `agent/loop.py` is wrapped in try/except — exceptions are ca
 | 0 | Model safety alignment | (DeepSeek model) | Refuses obviously malicious tasks at reasoning level |
 | 1 | Prompt injection guard | `tools/guard.py` | `<external>` boundary markers + outbound domain allowlist |
 | 2 | Permission tiers | `agent/permissions.py` | `allow` (read) / `confirm` (write/exec) / `deny` (destructive) |
-| 3 | Destructive command detection | `agent/permissions.py` | `rm -rf`, `chmod -R`, `mkfs`, etc. → always `deny` |
+| 3 | Destructive command detection | `agent/permissions.py` | Fork bomb/mkfs/dd/device writes → always `deny`; rm/chmod/chown → `deny` only when targeting system paths (`/`, `/etc`, `~`, …), else `confirm` |
 | 4 | Shell sandbox | `tools/shell.py` | bwrap (ro-bind `/`, bind cwd, unshare-net) + DENY_PATTERNS fallback |
 
 **Permission model (`agent/permissions.py:check()`):**
 
 - `READONLY = {read, grep, glob}` → `allow`
 - `WRITE = {write, edit}` → `confirm` if path in workdir, else `deny`
-- `EXEC = {bash, web_fetch}` → `confirm`; bash additionally checks `DESTRUCTIVE` patterns → `deny`
+- `EXEC = {bash, web_fetch}` → `confirm`; bash additionally:
+  - Checks `DESTRUCTIVE` (fork bomb/mkfs/dd/device writes) → `deny`
+  - Checks `DESTRUCTIVE_TARGETS` for rm/chmod/chown targeting system paths → `deny`
+  - Checks `SAFE_BASH` (ls/cat/echo/…) without risky operators → `allow`
+  - Everything else → `confirm`
 - Unknown tools (MCP) → `confirm` (conservative)
 
 **CLI flags:**
