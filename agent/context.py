@@ -84,8 +84,14 @@ def _sanitize_surrogates(s: str) -> str:
     这些非法字符常来自 subprocess 捕获输出时的 surrogateescape 解码，
     经过 json.dumps 或 httpx 序列化时会触发 'surrogates not allowed' 错误。
     策略：surrogateescape 编码回字节 → replace 解码，将非法序列替换为 U+FFFD。
+    若 surrogateescape 编码失败（surrogates 并非来自该来源），回退到 replace。
     """
-    return s.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    if not s:
+        return s
+    try:
+        return s.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    except UnicodeEncodeError:
+        return s.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def truncate_observation(text: str, max_chars: int = 4000) -> str:

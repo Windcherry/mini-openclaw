@@ -8,12 +8,57 @@
 """
 from __future__ import annotations
 import argparse
+import atexit
 import shutil
 import sys
 from pathlib import Path
 
 from tools.base import build_default_registry
 from agent.prompts import SYSTEM_PROMPT
+
+# ── readline 设置：光标自由移动 + 上下箭头历史 ──────────────
+# 在 Linux/WSL 上，导入 readline 即可激活 input() 的行编辑和历史功能。
+# macOS 可能需要 gnureadline（pip install gnureadline），降级处理。
+try:
+    import readline
+    _HAS_READLINE = True
+    _HISTFILE = Path.home() / ".mini-openclaw_history"
+    try:
+        readline.read_history_file(str(_HISTFILE))
+    except (FileNotFoundError, OSError):
+        pass
+    readline.set_history_length(1000)
+    atexit.register(readline.write_history_file, str(_HISTFILE))
+except ImportError:
+    _HAS_READLINE = False
+
+
+def _rl_prompt(text: str) -> str:
+    """将 ANSI 转义序列包裹在 \\001 / \\002 中，readline 才能正确计算光标位置。
+
+    不加这个包裹 → 左右箭头移动时光标会跳到错误位置（因为 readline 把 ANSI
+    码也算进了 prompt 宽度）。加了之后 readline 知道这些字节不占显示宽度。
+    """
+    if not _HAS_READLINE:
+        return text
+    result: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\033":
+            # ANSI 转义序列：从 ESC 开始到 [m 或类似终止符
+            end = i + 1
+            while end < len(text) and text[end] not in "mABCDEFGHJKSTfhlnsu":
+                end += 1
+            if end < len(text):
+                end += 1  # 吃掉终止字符
+            result.append("\001")
+            result.append(text[i:end])
+            result.append("\002")
+            i = end
+        else:
+            result.append(text[i])
+            i += 1
+    return "".join(result)
 
 # ── ANSI 颜色 ──────────────────────────────────────────────
 BLUE = "\033[38;5;33m"       # 深海豹蓝
@@ -138,7 +183,7 @@ def _chat_loop(args: argparse.Namespace) -> int:
 
     # 后端状态提示
     backend_label = f"{BLUE}DeepSeek{RESET}" if backend_type == "deepseek" else f"{DIM}FakeBackend (离线){RESET}"
-    model = "deepseek-chat" if backend_type == "deepseek" else "rule-based"
+    model = "deepseek-v4-flash" if backend_type == "deepseek" else "rule-based"
     print(f"  {DIM}后端: {backend_label}  {DIM}|  模型: {model}{RESET}")
     print(sep)
     print()
@@ -167,7 +212,7 @@ def _chat_loop(args: argparse.Namespace) -> int:
 
     while True:
         try:
-            user_input = input(f"{BLUE}  ⏣{RESET} ").strip()
+            user_input = input(_rl_prompt(f"{BLUE}  ⏣{RESET} ")).strip()
         except (KeyboardInterrupt, EOFError):
             print(f"\n  {DIM}自动保存会话...{RESET}")
             save_session(messages, system)
@@ -309,7 +354,7 @@ def _chat_loop(args: argparse.Namespace) -> int:
         messages.append({"role": "user", "content": user_input})
 
         # ── 思考中提示 ──
-        print(f"  {DIM}思考中...{RESET}", end="\r")
+        print(f"  {DIM}Thinking...{RESET}", end="\r")
 
         try:
             messages, result = agent.chat(messages)

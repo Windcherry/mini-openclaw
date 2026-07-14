@@ -1,4 +1,4 @@
-"""完整工具集：edit / grep / glob（Day6）+ web_fetch / task_list（Day7）。
+"""完整工具集：edit / grep / glob（Day6）+ web_fetch / todo（Day7/Day11+）。
 
 web_fetch 叠加出站白名单 + <external> 边界（Day10 注入防护）。
 """
@@ -101,45 +101,25 @@ def _web_fetch(url: str, max_tokens: int = 2000) -> str:
     return wrap_external(text, url)
 
 
-# --- task_list（TodoWrite）：自维护待办，提升长任务成功率 ---
-_tasks: list[dict] = []
+# --- TodoWrite（基于 agent/planning.py 的 TodoList 状态机）---
+from agent.planning import TodoList
+
+TODO = TodoList()   # 单会话内的规划状态
 
 
-def _task_list(action: str, items: list | None = None) -> str:
-    """维护结构化待办清单，作为模型的 scratchpad。
+def _todo_write(items: list[str]) -> str:
+    """面对多步任务时，先把它分解成有序子任务清单。"""
+    TODO.write(items)
+    return TODO.render()
 
-    action: add | update | complete | list
-    items: add 时为任务描述字符串列表；update/complete 时为含 id 的对象列表。
-    """
-    global _tasks
-    items = items or []
-    if action == "add":
-        for item in items:
-            _tasks.append({"id": len(_tasks) + 1,
-                           "content": str(item), "status": "pending"})
-        return f"已添加 {len(items)} 个任务，当前共 {len(_tasks)} 项。"
-    elif action == "update":
-        for item in items:
-            for t in _tasks:
-                if t["id"] == item.get("id"):
-                    t["content"] = item.get("content", t["content"])
-        return f"已更新 {len(items)} 个任务。"
-    elif action == "complete":
-        for item in items:
-            tid = item.get("id") if isinstance(item, dict) else item
-            for t in _tasks:
-                if t["id"] == tid:
-                    t["status"] = "completed"
-        return f"已完成 {len(items)} 个任务。"
-    elif action == "list":
-        if not _tasks:
-            return "当前无待办任务。"
-        lines = []
-        for t in _tasks:
-            mark = "✅" if t["status"] == "completed" else "⏳"
-            lines.append(f"{mark} [{t['id']}] {t['content']}")
-        return "\n".join(lines)
-    return f"未知 action: {action}，支持 add/update/complete/list。"
+
+def _update_todo(id: int, status: str) -> str:
+    """完成或开始某条子任务时更新其状态（in_progress / completed / blocked）。"""
+    ok = TODO.update(id, status)
+    if not ok:
+        valid = ", ".join(str(it["id"]) for it in TODO.items)
+        return f"[失败] 未找到任务 #{id}，当前任务 id：{valid}" if TODO.items else "[失败] 任务清单为空，请先调用 todo_write"
+    return TODO.render()
 
 
 edit_tool = Tool(
@@ -183,9 +163,22 @@ glob_tool = Tool(
 web_fetch_tool = Tool("web_fetch", "抓取 URL 并转为 markdown（受 token 预算限制）。",
                       {"type": "object", "properties": {"url": {"type": "string"}},
                        "required": ["url"]}, _web_fetch)
-task_list_tool = Tool("task_list", "维护任务待办清单（add/update/complete）。",
-                      {"type": "object", "properties": {"action": {"type": "string"},
-                       "items": {"type": "array"}}, "required": ["action"]}, _task_list)
+todo_write_tool = Tool(
+    name="todo_write",
+    description="面对多步任务时，先把它分解成有序子任务清单。传入子任务文本数组。",
+    parameters={"type": "object", "properties": {
+        "items": {"type": "array", "items": {"type": "string"}}}, "required": ["items"]},
+    run=_todo_write,
+)
+update_todo_tool = Tool(
+    name="update_todo",
+    description="完成或开始某条子任务时更新其状态。",
+    parameters={"type": "object", "properties": {
+        "id": {"type": "integer"},
+        "status": {"type": "string", "enum": ["in_progress", "completed", "blocked"]}},
+        "required": ["id", "status"]},
+    run=_update_todo,
+)
 
 
 # --- remember：模型自主写入持久记忆（Day11）---

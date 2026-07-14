@@ -12,18 +12,35 @@ READONLY = {"read", "grep", "glob"}
 WRITE    = {"write", "edit"}
 EXEC     = {"bash", "web_fetch"}
 
+# bash 安全命令（纯只读，不写文件不执行代码）→ 自动放行
+SAFE_BASH = {
+    "ls", "cat", "echo", "pwd", "whoami", "date", "head", "tail",
+    "wc", "which", "env", "printenv", "uname", "hostname", "id",
+    "df", "du", "free", "uptime", "ps", "pgrep",
+}
+# 含这些运算符的命令即使以安全命令开头也需确认
+RISKY_OPERATORS = (">", ">>", "|", ";", "&&", "||", "`", "$(")
+
 # 破坏性命令模式 —— 即使 --auto-approve 也必须拒绝
-# 这些操作不可逆，用户应手动在终端执行
+# 仅限于不可逆的系统级破坏操作：fork 炸弹、格式化、裸磁盘写入
 DESTRUCTIVE = (
-    "rm -rf",
-    "rm -r",
     ":(){",
     "mkfs",
     "dd if=",
     "> /dev/sd",
-    "chmod -R",
-    "chown -R",
 )
+
+# rm / chmod / chown 只有在目标为系统路径时才 deny，否则走 confirm
+DESTRUCTIVE_TARGETS = (
+    " / ",     # rm -rf /  、chmod -R /  等
+    " /*",     # rm -rf /*
+    " ~",      # rm -rf ~
+    "/etc", "/usr", "/bin", "/var", "/sys", "/proc",
+    "/dev", "/boot", "/root", "/lib", "/sbin", "/opt",
+    "$HOME",
+)
+
+DESTRUCTIVE_RISKY_CMDS = ("rm", "chmod", "chown")
 
 
 def check(tool_name: str, args: dict, workdir: Path) -> str:
@@ -56,10 +73,24 @@ def check(tool_name: str, args: dict, workdir: Path) -> str:
     # 第③层：执行 / 外传 → 先查破坏性命令，再确认
     if tool_name in EXEC:
         if tool_name == "bash":
-            command = args.get("command", "")
+            command = args.get("command", "").strip()
+            # 3a. 无条件破坏性命令：fork 炸弹、格式化、裸磁盘写 → 直接 deny
             for pattern in DESTRUCTIVE:
                 if pattern in command:
-                    return "deny"    # 破坏性命令：即使 --auto-approve 也不放行
+                    return "deny"
+            # 3b. rm/chmod/chown 只有目标为系统路径（/、/etc、~ 等）才 deny
+            first_word = command.split(maxsplit=1)[0] if command else ""
+            if first_word in DESTRUCTIVE_RISKY_CMDS:
+                for target in DESTRUCTIVE_TARGETS:
+                    if target in command:
+                        return "deny"
+                # 末尾 " /"（如 rm -rf / 、chmod 777 /）也 deny
+                if command.endswith(" /"):
+                    return "deny"
+            # 3c. 安全纯读命令（ls/cat/echo/…）：自动放行
+            if (first_word in SAFE_BASH
+                    and not any(op in command for op in RISKY_OPERATORS)):
+                return "allow"
         return "confirm"
 
     # 未知工具（含 MCP 工具）：保守策略，先确认

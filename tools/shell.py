@@ -13,6 +13,29 @@ import shutil
 import subprocess
 from .base import Tool
 
+# ── bwrap 可用性检测（缓存，避免每次 bash 调用都测一遍）──
+_bwrap_ok: bool | None = None
+
+
+def _check_bwrap() -> bool:
+    """检测 bwrap 是否真的能用（不只是存在）。"""
+    global _bwrap_ok
+    if _bwrap_ok is not None:
+        return _bwrap_ok
+    if not shutil.which("bwrap"):
+        _bwrap_ok = False
+        return False
+    try:
+        r = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "true"],
+            capture_output=True, timeout=5,
+        )
+        _bwrap_ok = r.returncode == 0
+    except Exception:
+        _bwrap_ok = False
+    return _bwrap_ok
+
+
 # 兜底黑名单 —— bwrap 不可用时的最后防线
 DENY_PATTERNS = (
     "rm -rf /",
@@ -23,6 +46,18 @@ DENY_PATTERNS = (
     "curl",
     "wget",
 )
+
+
+def _sanitize(s: str) -> str:
+    """清理 surrogate 字符，确保 UTF-8 可编码。"""
+    if not s:
+        return s
+    # 先尝试 surrogateescape 回环（处理 subprocess 输出的非法字节）
+    # 如果失败（surrogates 非 surrogateescape 来源），用 replace 兜底
+    try:
+        return s.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    except UnicodeEncodeError:
+        return s.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def _bash(command: str, timeout: int = 30) -> str:
@@ -40,7 +75,7 @@ def _bash(command: str, timeout: int = 30) -> str:
         if pattern in command:
             return f"[沙箱] 拒绝执行高危命令（匹配黑名单 '{pattern}'）：{command}"
 
-    if shutil.which("bwrap"):
+    if _check_bwrap():
         # bwrap 纵深沙箱：
         #   --ro-bind / /      → 根文件系统只读
         #   --bind cwd cwd     → 仅工作目录可写（覆盖根目录的同路径只读绑定）
@@ -67,9 +102,9 @@ def _bash(command: str, timeout: int = 30) -> str:
 
     # 清理 surrogate 字符（subprocess 在 text=True + surrogateescape 下可能产生）
     out = p.stdout or ""
-    out = out.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    out = _sanitize(out)
     if p.stderr:
-        out += f"\n[stderr]\n{p.stderr}"
+        out += f"\n[stderr]\n{_sanitize(p.stderr)}"
     if p.returncode != 0:
         out += f"\n[returncode={p.returncode}]"
     return out.strip() or "[无输出]"

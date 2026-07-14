@@ -70,8 +70,8 @@ def build_default_registry() -> ToolRegistry:
         reg.register(t)
     #
     # Day7 工具：
-    from .more_tools import web_fetch_tool, task_list_tool
-    for t in (web_fetch_tool, task_list_tool):
+    from .more_tools import web_fetch_tool, todo_write_tool, update_todo_tool
+    for t in (web_fetch_tool, todo_write_tool, update_todo_tool):
         reg.register(t)
 
     # Day11 记忆工具：
