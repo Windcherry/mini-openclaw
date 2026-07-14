@@ -106,7 +106,7 @@ bash 命令
   └─ 其余 confirm：    pip install、git push、rm ./folder …
 ```
 
-`--auto-approve` 可跳过 confirm，但 deny 不可绕过。
+`--auto-approve` / `--dangerously-skip-permissions` 可跳过 confirm 确认，但 deny 不可绕过。
 
 ### 任务规划
 
@@ -169,7 +169,7 @@ python -m security.redteam --backend deepseek --output security/report.md
 mini-openclaw/
 ├── agent/
 │   ├── cli.py           # CLI 入口，接线 + readline 设置
-│   ├── loop.py          # ReAct 主循环（心脏）
+│   ├── loop.py          # ReAct 主循环
 │   ├── permissions.py   # 权限分层（allow/confirm/deny）
 │   ├── planning.py      # TodoList 状态机 + LoopDetector
 │   ├── prompts.py       # 系统提示词

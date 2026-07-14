@@ -23,6 +23,8 @@ python -m agent.cli --help
 python -m agent.cli "创建 hello.py 并运行输出当前时间"
 # With auto-approve (skip permission confirmations for write/bash/web_fetch)
 python -m agent.cli --auto-approve "用 bash 列出当前目录文件"
+# --dangerously-skip-permissions does the same: skips confirm, deny still enforced
+python -m agent.cli --dangerously-skip-permissions "分析项目结构"
 # Specify working directory boundary
 python -m agent.cli --workdir /tmp/test "写文件到当前目录"
 
@@ -205,6 +207,7 @@ Tool execution in `agent/loop.py` is wrapped in `_run_tool_safely()` with automa
 **CLI flags:**
 
 - `--auto-approve` — skip `confirm` verdicts (but `deny` is never skippable)
+- `--dangerously-skip-permissions` — alias for `--auto-approve`; skips `confirm`, `deny` still enforced
 - `--workdir PATH` — set working directory boundary (default: cwd)
 
 **Red team results (6 cases, DeepSeek backend):**

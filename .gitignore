@@ -4,6 +4,7 @@ __pycache__/
 out-*/
 *.bin
 *.gguf
+*.pptx
 .DS_Store
 .mini-openclaw/
 security/report.md

@@ -150,7 +150,7 @@ def _build_agent(args: argparse.Namespace):
         backend_type = "fake"
 
     return AgentLoop(backend, reg, "", workdir=args.workdir,
-                     auto_approve=args.auto_approve), backend_type
+                     auto_approve=args.auto_approve or args.dangerously_skip_permissions), backend_type
 
 
 def _chat_loop(args: argparse.Namespace) -> int:
@@ -390,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="进入多轮对话模式（无 task 时默认行为）")
     p.add_argument("--auto-approve", action="store_true",
                    help="跳过权限确认，放行 confirm 级工具（写/bash/web_fetch）")
+    p.add_argument("--dangerously-skip-permissions", action="store_true",
+                   help="跳过 confirm 级权限确认，但 deny 命令依然严格禁止")
     p.add_argument("--workdir", type=Path, default=Path.cwd(),
                    help="工作目录边界（默认当前目录），写入操作不得越界")
     args = p.parse_args(argv)
