@@ -52,8 +52,11 @@ class DeepSeekBackend:
             json=payload,
         )
         resp.raise_for_status()
-        msg = resp.json()["choices"][0]["message"]
-        return self._normalize(msg)
+        body = resp.json()
+        msg = body["choices"][0]["message"]
+        result = self._normalize(msg)
+        result["usage"] = body.get("usage", {})   # 供 tracer 做成本核算
+        return result
 
     # --- 把内部 messages（含 role=tool）转成 OpenAI 标准格式 ---
     def _to_openai_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -124,7 +124,7 @@ The loop in `agent/loop.py` assigns an `id` to each tool call from the model's r
 | `eval/metrics.py` | 4 metrics (success_rate, step_count, token_count, json_valid_rate) + 15 SAMPLE_RECORDS | **Complete** (Day3) |
 | `eval/judge.py` | LLM-as-judge with 6 domain-specific rubrics | **Complete** (Day3) |
 | `eval/tracer.py` | JSONL trajectory recorder (Tracer, replay, load_trajectory) | **Complete** (Day3) |
-| `eval/ablation.py` | Ablation study tooling + system-prompt ablation groups | **Complete** (Day3) |
+| `eval/ablation.py` | 5-dimension ablation study (system-prompt / compaction / truncation / MCP / Skills) with sample trajectories + CLI runner (`--name` filter, `--help`) | **Complete** (Day10) |
 | `security/redteam.py` | Red team security testing: 4 attack surfaces × 6 test cases, dual-mode (model reasoning + tool-layer direct), auto-generated markdown report | **Complete** (Day10) |
 
 ### Key Design Decisions

@@ -128,8 +128,9 @@ def _build_system(task: str = "") -> str:
 
 
 def _build_agent(args: argparse.Namespace):
-    """构建 AgentLoop 实例（注册表 + MCP + 后端 + 权限）。"""
+    """构建 AgentLoop 实例（注册表 + MCP + 后端 + 权限 + Tracer）。"""
     from agent.loop import AgentLoop
+    from agent.tracer import Tracer
     reg = build_default_registry()
 
     from mcp.client import MCPClient, register_mcp_tools
@@ -149,8 +150,61 @@ def _build_agent(args: argparse.Namespace):
         backend = FakeBackend()
         backend_type = "fake"
 
-    return AgentLoop(backend, reg, "", workdir=args.workdir,
-                     auto_approve=args.auto_approve or args.dangerously_skip_permissions), backend_type
+    tracer = Tracer()
+    return (AgentLoop(backend, reg, "", workdir=args.workdir,
+                      auto_approve=args.auto_approve or args.dangerously_skip_permissions,
+                      tracer=tracer), backend_type, tracer)
+
+
+def _plan_and_confirm(agent, task: str, auto_approve: bool = False) -> str | None:
+    """规划→展示→确认流程。返回确认后的计划文本，或 None（用户取消）。
+
+    支持 [y]确认 / [e]修改（含反馈重新生成） / [n]取消。
+    """
+    print(f"\n  {DIM}📋 正在生成执行计划...{RESET}\n")
+    plan_text = agent.plan(task)
+    print(plan_text)
+    print()
+
+    if auto_approve:
+        print(f"  {DIM}（--auto-approve 已启用，自动接受计划）{RESET}")
+        return plan_text
+
+    max_retries = 3
+    for _ in range(max_retries):
+        try:
+            answer = input(_rl_prompt(
+                f"  {BLUE}是否按此计划执行？{RESET} [y]确认 [e]修改 [n]取消: "
+            )).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n  {DIM}已取消{RESET}")
+            return None
+
+        if answer in ("y", "yes"):
+            return plan_text
+        elif answer in ("n", "no"):
+            print(f"  {DIM}已取消{RESET}")
+            return None
+        elif answer in ("e", "edit"):
+            try:
+                feedback = input(_rl_prompt(f"  {BLUE}修改意见：{RESET} ")).strip()
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n  {DIM}已取消{RESET}")
+                return None
+            if not feedback:
+                continue
+            print(f"\n  {DIM}📋 正在更新计划...{RESET}\n")
+            plan_text = agent.plan(
+                f"原任务：{task}\n\n用户对上一版计划的修改意见：{feedback}\n\n请根据修改意见生成新的执行计划。"
+            )
+            print(plan_text)
+            print()
+        else:
+            print(f"  {DIM}请输入 y/e/n{RESET}")
+
+    # 达到最大修改次数，接受最后生成的计划
+    print(f"  {DIM}（已达最大修改次数，接受最后生成的计划）{RESET}")
+    return plan_text
 
 
 def _chat_loop(args: argparse.Namespace) -> int:
@@ -163,7 +217,7 @@ def _chat_loop(args: argparse.Namespace) -> int:
     print(f"  {DIM}输入 /help 查看命令  |  /exit 退出{RESET}")
     print()
 
-    agent, backend_type = _build_agent(args)
+    agent, backend_type, tracer = _build_agent(args)
     system = _build_system()
 
     # 检查是否有历史会话可恢复
@@ -190,6 +244,13 @@ def _chat_loop(args: argparse.Namespace) -> int:
 
     if backend_type == "fake":
         print(f"  {DIM}⚠ FakeBackend 仅匹配少量关键词，请配置 DEEPSEEK_API_KEY 获得完整体验{RESET}")
+        print()
+
+    # ── 计划模式状态 ──
+    plan_mode: bool = args.plan
+    if plan_mode:
+        print(f"  {TEAL}▸ 计划模式已启用：每个任务将先生成计划，确认后执行{RESET}")
+        print(f"  {DIM}  输入 /plan 切换{RESET}")
         print()
 
     def _show_tokens(msgs):
@@ -226,6 +287,13 @@ def _chat_loop(args: argparse.Namespace) -> int:
         if user_input in ("/exit", "/quit", "/q"):
             save_session(messages, system)
             print(f"  {DIM}会话已保存 · 再见！{RESET}")
+            # --trace 时显示本次会话的 trace 回放与成本
+            if args.trace and tracer and tracer.spans:
+                print(f"\n  {BOLD}▸ Trace 回放{RESET}")
+                from agent.tracer import replay, cost_report
+                replay(tracer)
+                print()
+                cost_report(tracer)
             break
 
         if user_input == "/clear":
@@ -317,7 +385,21 @@ def _chat_loop(args: argparse.Namespace) -> int:
             print(f"  {DIM}/save [path]{RESET}        导出对话为 Markdown")
             print(f"  {DIM}/mem{RESET}               查看持久记忆")
             print(f"  {DIM}/model{RESET}             查看当前后端信息")
+            print(f"  {DIM}/trace{RESET}             查看本次运行的 span 回放 + 成本")
+            print(f"  {DIM}/plan{RESET}             切换计划模式（先出计划，确认后执行）")
             print(f"  {DIM}Ctrl+C{RESET}             中断当前回答\n")
+            continue
+
+        if user_input == "/trace":
+            if not tracer or not tracer.spans:
+                print(f"  {DIM}（暂无 trace 数据）{RESET}\n")
+            else:
+                from agent.tracer import replay, cost_report
+                print()
+                replay(tracer)
+                print()
+                cost_report(tracer)
+                print()
             continue
 
         if user_input == "/mem":
@@ -341,6 +423,12 @@ def _chat_loop(args: argparse.Namespace) -> int:
             print()
             continue
 
+        if user_input == "/plan":
+            plan_mode = not plan_mode
+            status = f"{TEAL}已启用{RESET}" if plan_mode else f"{DIM}已禁用{RESET}"
+            print(f"  {DIM}计划模式:{RESET} {status}\n")
+            continue
+
         # ── Skills 按需注入 ──
         from skills.loader import match_skills, load_skills
         skills = load_skills()
@@ -351,21 +439,53 @@ def _chat_loop(args: argparse.Namespace) -> int:
                 extra += f"\n## {s.name}\n{s.body}\n"
             messages[0]["content"] = system + "\n\n# 本轮激活 Skill\n" + extra
 
-        messages.append({"role": "user", "content": user_input})
+        # ── 计划模式：先规划，再执行 ──
+        if plan_mode:
+            plan_text = _plan_and_confirm(
+                agent, user_input,
+                auto_approve=args.auto_approve or args.dangerously_skip_permissions
+            )
+            if plan_text is None:
+                print(f"  {DIM}计划被取消，跳过此任务{RESET}\n")
+                print(sep)
+                print()
+                continue
+            # 清除旧计划消息，注入新计划
+            messages = [m for m in messages
+                        if not (m.get("role") == "system"
+                                and m.get("content", "").startswith("# 执行计划"))]
+            messages.append({"role": "user", "content": user_input})
+            messages.insert(1, {
+                "role": "system",
+                "content": f"# 执行计划（用户已确认，严格按此计划推进）\n\n{plan_text}",
+            })
+            print(f"  {DIM}Thinking...{RESET}", end="\r")
+            try:
+                messages, result = agent.chat(messages)
+            except KeyboardInterrupt:
+                print(f"\r  {DIM}⏎ 已中断{RESET}")
+                save_session(messages, system)
+                print(sep)
+                print()
+                continue
+            except Exception as e:
+                result = f"[错误] Agent 运行异常：{e}"
+        else:
+            messages.append({"role": "user", "content": user_input})
 
-        # ── 思考中提示 ──
-        print(f"  {DIM}Thinking...{RESET}", end="\r")
+            # ── 思考中提示 ──
+            print(f"  {DIM}Thinking...{RESET}", end="\r")
 
-        try:
-            messages, result = agent.chat(messages)
-        except KeyboardInterrupt:
-            print(f"\r  {DIM}⏎ 已中断{RESET}")
-            save_session(messages, system)
-            print(sep)
-            print()
-            continue
-        except Exception as e:
-            result = f"[错误] Agent 运行异常：{e}"
+            try:
+                messages, result = agent.chat(messages)
+            except KeyboardInterrupt:
+                print(f"\r  {DIM}⏎ 已中断{RESET}")
+                save_session(messages, system)
+                print(sep)
+                print()
+                continue
+            except Exception as e:
+                result = f"[错误] Agent 运行异常：{e}"
 
         # 清除"思考中"并打印结果
         print(f"\r{DIM}──────────────{RESET}")
@@ -394,6 +514,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="跳过 confirm 级权限确认，但 deny 命令依然严格禁止")
     p.add_argument("--workdir", type=Path, default=Path.cwd(),
                    help="工作目录边界（默认当前目录），写入操作不得越界")
+    p.add_argument("--trace", action="store_true",
+                   help="任务结束后打印 trace 回放报告（span 列表 + token 成本核算）")
+    p.add_argument("--plan", action="store_true",
+                   help="启用规划模式：先出计划 → 用户确认 → 再执行")
     args = p.parse_args(argv)
 
     if args.selfcheck:
@@ -404,13 +528,35 @@ def main(argv: list[str] | None = None) -> int:
         return _chat_loop(args)
 
     # 单次任务模式（兼容旧接口）
-    agent, _ = _build_agent(args)
+    agent, _, tracer = _build_agent(args)
     agent.system_prompt = _build_system(args.task)
+
+    if args.plan:
+        plan_text = _plan_and_confirm(
+            agent, args.task,
+            auto_approve=args.auto_approve or args.dangerously_skip_permissions
+        )
+        if plan_text is None:
+            print(f"  {DIM}计划被取消，未执行任何操作{RESET}")
+            return 0
+        # 注入计划到 system_prompt
+        agent.system_prompt += f"\n\n# 执行计划（用户已确认，严格按此计划推进）\n\n{plan_text}"
+
     try:
         result = agent.run(args.task)
     except Exception as e:
         result = f"[错误] Agent 运行异常：{e}"
     print(result)
+    # --trace 时显示 trace 回放 + 成本
+    if args.trace and tracer and tracer.spans:
+        from agent.tracer import replay, cost_report
+        print()
+        print(f"{'─'*50}")
+        print("Trace 回放")
+        print(f"{'─'*50}")
+        replay(tracer)
+        print()
+        cost_report(tracer)
     return 0
 
 

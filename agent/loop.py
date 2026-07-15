@@ -12,18 +12,23 @@
 
 Day11+ 集成：todo 注入每轮上下文 + 错误恢复（TransientError 重试退避 /
 PermanentError 引导重规划 / 反复失败 → block）。
+
+Tracer 集成：每次 LLM 调用与工具执行记入 span，可 replay 回放 + cost_report 核算。
+并行工具执行：多工具调用时用 ThreadPoolExecutor 并发执行（讲义 §7.2）。
 """
 from __future__ import annotations
+import json
 from typing import Any
 
 import httpx
 import time
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from tools.base import ToolRegistry
 from .context import maybe_compact, truncate_observation
 from .permissions import check as permissions_check
+from .tracer import Tracer
 
 WORKDIR = Path.cwd().resolve()
 
@@ -85,20 +90,100 @@ def _run_tool_safely(tool: Any, tool_args: dict, max_retries: int = 3) -> str:
     return f"[重试耗尽] {last_error}"
 
 
+def _tool_call_display(call: dict) -> str:
+    """格式化工具调用为可显示字符串（工具名 + JSON 参数）。"""
+    name = call.get("name", "?")
+    args = call.get("arguments", {})
+    args_json = json.dumps(args, ensure_ascii=False, indent=2)
+    return f"  🔧 {name}\n  {args_json}"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 并行工具执行辅助
+# ══════════════════════════════════════════════════════════════════════
+
+def _exec_tool_parallel(exec_tasks: list[tuple[dict, Any, dict]],
+                        tracer: Tracer | None = None) -> list[tuple[dict, str]]:
+    """用线程池并发执行多个工具调用。
+
+    Args:
+        exec_tasks: [(call_dict, tool_instance, tool_args), ...]
+        tracer: 可选 Tracer，有则每个工具执行记一个 span
+
+    Returns:
+        [(call_dict, observation_str), ...]，顺序与输入一致
+    """
+    if len(exec_tasks) <= 1:
+        # 单个工具：直接执行，不开线程池
+        call, tool, tool_args = exec_tasks[0]
+        if tracer:
+            obs = tracer.span("tool", call["name"],
+                              lambda t=tool, ta=tool_args: _run_tool_safely(t, ta))
+        else:
+            obs = _run_tool_safely(tool, tool_args)
+        return [(call, str(obs))]
+
+    # 多个工具：并行执行
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # 构建 call_id → call 映射（保持消息顺序）
+    future_to_call: dict = {}
+    with ThreadPoolExecutor(max_workers=min(len(exec_tasks), 4)) as ex:
+        for call, tool, tool_args in exec_tasks:
+            def _runner(t=tool, ta=tool_args, name=call["name"]):
+                if tracer:
+                    return tracer.span("tool", name,
+                                       lambda t2=t, ta2=ta: _run_tool_safely(t2, ta2))
+                else:
+                    return _run_tool_safely(t, ta)
+            future = ex.submit(_runner)
+            future_to_call[future] = call
+
+    # 收集结果（保持提交顺序）
+    results: list[tuple[dict, str]] = []
+    for future in as_completed(future_to_call):
+        call = future_to_call[future]
+        try:
+            obs = str(future.result())
+        except Exception as e:
+            obs = f"[并行执行异常] {call['name']}: {e}"
+        results.append((call, obs))
+
+    return results
+
+
 
 class AgentLoop:
     def __init__(self, backend: Any, registry: ToolRegistry, system_prompt: str,
                  max_turns: int = 100, workdir: Path = WORKDIR,
-                 auto_approve: bool = False):
+                 auto_approve: bool = False, tracer: Tracer | None = None):
         self.backend = backend
         self.registry = registry
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self.workdir = workdir.resolve()
         self.auto_approve = auto_approve
+        self.tracer = tracer
         # 长程控制（讲义 §8.2）：绕圈 / 停滞检测
         from .planning import LoopDetector
         self._loop_detector = LoopDetector()
+
+    def plan(self, task: str) -> str:
+        """生成任务的执行计划（不调用工具）。
+
+        向模型发送规划专用 prompt，不传 tools 列表，
+        强制模型只输出文本计划。
+        """
+        from .prompts import PLAN_MODE_PROMPT
+        plan_messages = [
+            {"role": "system", "content": PLAN_MODE_PROMPT},
+            {"role": "user", "content": task},
+        ]
+        try:
+            assistant = self.backend.chat(plan_messages, tools=[])
+            return assistant.get("content", "") or "[规划阶段] 模型未返回有效计划。"
+        except Exception as e:
+            return f"[规划失败] {e}"
 
     def _execute_turn(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
         """执行一轮 ReAct：调用后端 → 执行工具 → 注入 observation。
@@ -107,24 +192,30 @@ class AgentLoop:
         """
         turn_messages = list(messages)
 
-        # ── Todo 注入：每轮把当前任务清单拼进上下文（防漂移，讲义 §8.3）──
-        # 先清除上一轮的旧注入，再插入到 system prompt 之后，避免累积重复。
-        # 插入位置为 1（紧跟主 system prompt），而非 append 到末尾 ——
-        # 因为末尾的 system 消息可能导致部分 API（如 DeepSeek）返回 400。
+        # ── 计算注入位置：如果存在执行计划（# 执行计划），则注入到计划之后 ──
+        _PLAN_MARKER = "# 执行计划"
         _TODO_MARKER = "# 当前任务清单"
+        _insert_pos = 1
+        if (len(turn_messages) > 1
+                and turn_messages[1].get("role") == "system"
+                and turn_messages[1].get("content", "").startswith(_PLAN_MARKER)):
+            _insert_pos = 2
+
+        # ── Todo 注入：每轮把当前任务清单拼进上下文（防漂移，讲义 §8.3）──
+        # 先清除上一轮的旧注入，再插入到 system prompt（或计划）之后，避免累积重复。
         turn_messages = [m for m in turn_messages
                          if not (m.get("role") == "system" and m.get("content", "").startswith(_TODO_MARKER))]
         try:
             from tools.more_tools import TODO
             todo_snapshot = ""
             if TODO.items:
-                turn_messages.insert(1, {
+                turn_messages.insert(_insert_pos, {
                     "role": "system",
                     "content": f"{_TODO_MARKER}（推进它，别跑偏）\n{TODO.render()}",
                 })
                 todo_snapshot = TODO.snapshot_status()
         except ImportError:
-            pass
+            todo_snapshot = ""
 
         # ── 绕圈 / 停滞警告注入（讲义 §8.2）──
         loop_warn = self._loop_detector.is_looping()
@@ -136,13 +227,20 @@ class AgentLoop:
             if stall_warn:
                 warnings.append(f"⚠️ {stall_warn}")
             warnings.append("请停止当前策略，重新规划下一步。")
-            turn_messages.insert(1, {
+            turn_messages.insert(_insert_pos, {
                 "role": "system",
                 "content": "\n".join(warnings),
             })
 
+        # ── LLM 调用（包入 tracer span）──
+        def _call_backend():
+            return self.backend.chat(turn_messages, tools=self.registry.schemas())
+
         try:
-            assistant = self.backend.chat(turn_messages, tools=self.registry.schemas())
+            if self.tracer:
+                assistant = self.tracer.span("llm", "decide", _call_backend, tokens=None)
+            else:
+                assistant = _call_backend()
         except httpx.HTTPStatusError as e:
             code = e.response.status_code
             # 尝试提取 API 返回的详细错误信息
@@ -168,6 +266,14 @@ class AgentLoop:
         except httpx.ConnectError as e:
             return turn_messages, f"[错误] 无法连接 API 服务：{e}"
 
+        # ── 从 assistant 响应中提取 usage 并补入最近一个 llm span ──
+        if self.tracer and self.tracer.last_span and self.tracer.last_span["kind"] == "llm":
+            usage = assistant.get("usage", {})
+            if usage:
+                self.tracer.last_span["tokens"] = usage.get("total_tokens", 0)
+                self.tracer.last_span["prompt_tokens"] = usage.get("prompt_tokens", 0)
+                self.tracer.last_span["completion_tokens"] = usage.get("completion_tokens", 0)
+
         turn_messages.append({"role": "assistant",
                               "content": assistant.get("content", ""),
                               "tool_calls": assistant.get("tool_calls", [])})
@@ -176,43 +282,69 @@ class AgentLoop:
         if not tool_calls:
             return turn_messages, assistant.get("content", "")
 
+        # ── 工具执行（权限检查 + 并行执行 + tracer span）──
+        exec_tasks: list[tuple[dict, Any, dict]] = []  # 可并行执行的任务
+
         for call in tool_calls:
             tool_name = call["name"]
             tool_args = call.get("arguments", {})
             tool = self.registry.get(tool_name)
             if tool is None:
                 obs = f"错误：未知工具 {tool_name}"
-            else:
-                verdict = permissions_check(tool_name, tool_args, self.workdir)
-                if verdict == "deny":
-                    obs = f"[权限层] 拒绝：越界写入或危险操作 —— {tool_name}({tool_args})"
-                elif verdict == "confirm":
-                    if self.auto_approve:
-                        obs = _run_tool_safely(tool, tool_args)
+                obs = truncate_observation(obs)
+                turn_messages.append({"role": "tool", "name": call["name"],
+                                      "tool_call_id": call.get("id"), "content": obs})
+                continue
+
+            verdict = permissions_check(tool_name, tool_args, self.workdir)
+            if verdict == "deny":
+                obs = f"[权限层] 拒绝：越界写入或危险操作 —— {tool_name}({tool_args})"
+                obs = truncate_observation(obs)
+                print(_tool_call_display(call))
+                print(f"  🚫 权限拒绝")
+                turn_messages.append({"role": "tool", "name": call["name"],
+                                      "tool_call_id": call.get("id"), "content": obs})
+            elif verdict == "confirm" and not self.auto_approve:
+                # 需要用户确认 —— 同步处理，不并行
+                print(f"\n  ⚠  工具 {tool_name} 需要确认：")
+                for k, v in tool_args.items():
+                    print(f"      {k}: {v}")
+                answer = input(f"      是否执行？[y/N] ").strip().lower()
+                if answer in ("y", "yes"):
+                    if self.tracer:
+                        obs = self.tracer.span("tool", tool_name,
+                                               lambda t=tool, ta=tool_args: _run_tool_safely(t, ta))
                     else:
-                        # 需要用户确认
-                        print(f"\n  ⚠  工具 {tool_name} 需要确认：")
-                        for k, v in tool_args.items():
-                            print(f"      {k}: {v}")
-                        answer = input(f"      是否执行？[y/N] ").strip().lower()
-                        if answer in ("y", "yes"):
-                            obs = _run_tool_safely(tool, tool_args)
-                        else:
-                            # 用户拒绝 → 终止整个任务，不给模型绕过的机会
-                            return turn_messages, (
-                                f"[已取消] 用户拒绝了 {tool_name} 操作，任务中断。\n"
-                                f"参数：{tool_args}"
-                            )
+                        obs = _run_tool_safely(tool, tool_args)
+                    print(_tool_call_display(call))
+                    print(f"  → {str(obs)[:120].strip()}")
                 else:
-                    obs = _run_tool_safely(tool, tool_args)
+                    # 用户拒绝 → 终止整个任务，不给模型绕过的机会
+                    return turn_messages, (
+                        f"[已取消] 用户拒绝了 {tool_name} 操作，任务中断。\n"
+                        f"参数：{tool_args}"
+                    )
+                obs = truncate_observation(str(obs))
+                turn_messages.append({"role": "tool", "name": call["name"],
+                                      "tool_call_id": call.get("id"), "content": obs})
+            else:
+                # allow 或 confirm+auto_approve → 可安全并行
+                exec_tasks.append((call, tool, tool_args))
 
-            obs = truncate_observation(str(obs))
-            turn_messages.append({"role": "tool", "name": call["name"],
-                                  "tool_call_id": call.get("id"), "content": obs})
+        # ── 批量并行执行工具 ──
+        if exec_tasks:
+            results = _exec_tool_parallel(exec_tasks, self.tracer)
+            for call, obs in results:
+                obs = truncate_observation(str(obs))
+                print(_tool_call_display(call))
+                print(f"  → {obs[:120].strip()}")
+                turn_messages.append({"role": "tool", "name": call["name"],
+                                      "tool_call_id": call.get("id"), "content": obs})
 
-            # ── 绕圈 / 停滞检测：记录每步工具调用（讲义 §8.2）──
+        # ── 绕圈 / 停滞检测：记录每步工具调用（讲义 §8.2）──
+        for call in tool_calls:
             try:
-                self._loop_detector.feed(tool_name, tool_args, todo_snapshot)
+                self._loop_detector.feed(call["name"], call.get("arguments", {}), todo_snapshot)
             except Exception:
                 pass
 

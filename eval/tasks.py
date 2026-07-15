@@ -241,3 +241,73 @@ E2E_TASKS: list[E2ETask] = [
     E2ETask("todo-report", "扫描本项目所有 Python 文件里的 TODO 注释，生成 markdown 报告",
             "生成的报告列出了真实存在的 TODO"),
 ]
+
+
+# ============================================================================
+# Day7 / Day10 消融专用判据函数
+# ============================================================================
+
+def _check_multi_file_analysis(traj: Trajectory) -> bool:
+    """Day7 compaction：成功 = 读取了 4 个以上文件，且最终答复覆盖多个模块。"""
+    read_count = sum(
+        1 for s in traj.get("steps", [])
+        for tc in s.get("tool_calls", [])
+        if tc.get("name") == "read"
+    )
+    final = traj.get("final", "")
+    return read_count >= 4 and len(final) > 300
+
+
+def _check_large_file_handling(traj: Trajectory) -> bool:
+    """Day7 truncation：成功 = 读取了大文件，答复中提及截断或文件过长。"""
+    used_read = any(
+        tc.get("name") == "read"
+        for s in traj.get("steps", [])
+        for tc in s.get("tool_calls", [])
+    )
+    final = traj.get("final", "")
+    return used_read and (
+        "截断" in final or "过长" in final or
+        "仅显示" in final or "前" in final or
+        len(final) > 200
+    )
+
+
+def _check_mcp_tool_used(traj: Trajectory) -> bool:
+    """Day10 MCP：成功 = 轨迹中出现了 mcp__echo 或 mcp__ 前缀的工具调用。"""
+    return any(
+        (tc.get("name") or "").startswith("mcp__")
+        for s in traj.get("steps", [])
+        for tc in s.get("tool_calls", [])
+    )
+
+
+def _check_structured_guide(traj: Trajectory) -> bool:
+    """Day10 Skills：成功 = 答复包含结构化导读内容（模块、架构、依赖等关键词密集）。"""
+    final = traj.get("final", "")
+    keywords = ["模块", "架构", "层", "依赖", "入口", "目录", "核心"]
+    hits = sum(1 for kw in keywords if kw in final)
+    return hits >= 4 and len(final) > 400
+
+
+# ---- Day7 消融任务 ----
+
+ABLATION_TASKS_DAY7: list[Task] = [
+    Task("multi-file-analysis",
+         "请阅读 agent/loop.py、agent/permissions.py、tools/shell.py、tools/guard.py、tools/fs.py 这 5 个文件，总结它们各自的功能以及模块间的协作关系",
+         _check_multi_file_analysis),
+    Task("large-file",
+         "用 read 读取 tools/code_analysis.py，如果内容过长被截断，请说明截断情况并基于可见部分做分析",
+         _check_large_file_handling),
+]
+
+# ---- Day10 消融任务 ----
+
+ABLATION_TASKS_DAY10: list[Task] = [
+    Task("mcp-integration",
+         "调用 mcp__echo 工具发送 'hello from ablation test'，验证 MCP 集成是否正常",
+         _check_mcp_tool_used),
+    Task("structured-guide",
+         "对我当前的项目仓库做一次完整的代码库导读：盘点所有模块、追踪依赖关系、定位入口点、输出结构化的导读报告",
+         _check_structured_guide),
+]
